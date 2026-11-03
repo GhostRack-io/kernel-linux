@@ -818,7 +818,8 @@ expect_absent serial.log 'grew the root file system'
 show_logs "${before}"
 
 # 10. Version 3 without init_system is version 2's run mode; init_system
-# gives the image's init container=ghostrack and is refused on a version-2 boot and with a user other than root.
+# gives the image's init container=ghostrack and is refused on a version-2
+# boot and with a user other than root.
 before=${failures}
 boot exit-3-v3 '{"version":3,"argv":["/bin/sh","-c","exit 3"]}' "${v3_cmdline}"
 expect_started 3

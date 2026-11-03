@@ -17,7 +17,7 @@ static ON_DISK: AtomicBool = AtomicBool::new(false);
 /// How long a report retries a host that does not answer.
 const REPORT_RETRY: Duration = Duration::from_secs(2);
 
-/// What begins every line of the init's on the console, reports included
+/// What begins every line the init writes on the console, reports included
 /// (`gigahost-init: ` before release 6.18.57-gh8).
 pub const PREFIX: &str = "ghostrack-init: ";
 

@@ -159,6 +159,7 @@ default_cmdline="console=ttyS0 quiet gh.v=1 gh.hostname=case-host ${network}"
 v2_cmdline="console=ttyS0 quiet gh.v=2 gh.hostname=case-host ${network}"
 v3_cmdline="console=ttyS0 quiet gh.v=3 gh.hostname=case-host ${network}"
 v5_cmdline="console=ttyS0 quiet gh.v=5 gh.hostname=case-host ${network}"
+v6_cmdline="console=ttyS0 quiet gh.v=6 gh.hostname=case-host ${network}"
 unpack_cmdline=${v2_cmdline}
 
 failures=0
@@ -167,6 +168,9 @@ case_dir=
 # arguments; a case may set either for its boots.
 config_entry=opt/ghostrack/config
 extra_fw_cfg=()
+
+# More QEMU arguments for the next boots (state disks, a second NIC).
+qemu_extra=()
 
 fail() {
     echo "  FAIL: $*"
@@ -199,6 +203,7 @@ qemu() {
         -drive "file=${disk},format=raw,if=none,id=disk" \
         -device virtio-blk-pci,drive=disk \
         "${layers_args[@]}" \
+        "${qemu_extra[@]}" \
         -netdev user,id=net0,restrict=on,ipv4=on,net=10.115.0.0/24,host=10.115.0.1,dns=10.115.0.3,ipv6=on,ipv6-net=fd15:115::/64,ipv6-host=fd15:115::1 \
         -device virtio-net-pci,netdev=net0 \
         -object rng-random,id=rng0,filename=/dev/urandom \
@@ -495,7 +500,7 @@ before=${failures}
 boot features '{"version":1,"argv":["/bin/sh","/usr/local/bin/features.sh"]}'
 expect_started
 passed=$(grep -a -c '^FEATURE [a-z0-9_]* PASS' "${case_dir}/hvc.log" || true)
-[[ ${passed} == 21 ]] || fail "expected 21 passing feature checks, got ${passed}"
+[[ ${passed} == 27 ]] || fail "expected 27 passing feature checks, got ${passed}"
 expect_absent hvc.log ' FAIL '
 expect_report '"code":0,"signal":null,"reason":"exited"'
 show_logs "${before}"
@@ -585,7 +590,7 @@ expect_absent serial.log '"event":"started"'
 expect_absent hvc.log ran
 show_logs "${before}"
 before=${failures}
-boot cmdline-v6 '{"version":1,"argv":["/bin/sh","-c","echo ran"]}' "console=ttyS0 quiet gh.v=6 gh.hostname=case-host ${network}"
+boot cmdline-v7 '{"version":1,"argv":["/bin/sh","-c","echo ran"]}' "console=ttyS0 quiet gh.v=7 gh.hostname=case-host ${network}"
 expect_report '"reason":"error","message":"gh.v names an interface version this init does not support"'
 expect_absent serial.log '"event":"started"'
 show_logs "${before}"
@@ -875,6 +880,86 @@ expect_absent serial.log '"event":"started"'
 expect_absent hvc.log ran
 show_logs "${before}"
 
+# state_disk_args NAME FILE SERIAL: QEMU's arguments for FILE as a
+# virtio-blk disk with the virtio serial SERIAL, as the host sets libvirt's
+# <serial>.
+state_disk_args() {
+    printf '%s\n' -drive "file=$2,format=raw,if=none,id=$1" -device "virtio-blk-pci,drive=$1,serial=$3"
+}
+
+# 13. Version 6's state disk: found by its serial, mounted at /state
+# (nodev, nosuid, noatime) and grown with its disk; its directory app is
+# bound over /etc/apk, filled from the image's /etc/apk when made on the
+# first boot only. What the process writes there is on the state disk at
+# the next boot; the root disk's own /etc/apk is never written.
+state_config=$(cat << 'JSON'
+{"version":6,"disks":[{"serial":"state-1","path":"/state","binds":[{"source":"app","path":"/etc/apk"}]}],
+ "argv":["/bin/sh","-c","grep ' /state ext4 ' /proc/mounts | grep -q 'nosuid,nodev,noatime' && echo STATE_MOUNTED; df -Pk /state | awk 'NR == 2 { print \"STATE_KIB=\" $2 }'; cat /etc/apk/mine 2>/dev/null || echo NO_MINE; test -e /etc/apk/world && echo HAS_WORLD; rm -f /etc/apk/world; echo persisted > /etc/apk/mine"]}
+JSON
+)
+before=${failures}
+new_case state-first "${state_config}"
+cp --sparse=always "${work}/disk.img" "${case_dir}/disk.img"
+mkfs.ext4 -q -F -L state -E root_owner=0:0 "${case_dir}/state.img" 64M > /dev/null
+truncate -s 128M "${case_dir}/state.img"
+mapfile -t qemu_extra < <(state_disk_args state0 "${case_dir}/state.img" state-1)
+qemu "${v6_cmdline}" "${case_timeout}" "${case_dir}/disk.img"
+qemu_extra=()
+expect_started 6
+tr -d '\r' < "${case_dir}/hvc.log" > "${case_dir}/console.txt"
+expect_line console.txt STATE_MOUNTED
+expect_line console.txt NO_MINE
+expect_line console.txt HAS_WORLD
+state_kib=$(grep -a -m 1 '^STATE_KIB=[0-9]*$' "${case_dir}/console.txt" | sed 's/^STATE_KIB=//' || true)
+(( ${state_kib:-0} > 100000 )) || fail "the grown state disk has ${state_kib:-0} KiB, expected more than 100000"
+grep -a -q -E "^gigahost-init: grew state disk 0's file system from [0-9]+ to [0-9]+ blocks" "${case_dir}/serial.log" \
+    || fail "no line saying the state disk grew"
+grep -a -q -E "^gigahost-init: state disk 0 bind 0: copied [1-9][0-9]* entries of the image's path" "${case_dir}/serial.log" \
+    || fail "no line saying the bind's source was filled"
+expect_report '{"v":6,"event":"exited","code":0,"signal":null,"reason":"exited"}'
+[[ $(debugfs -R 'cat /app/mine' "${case_dir}/state.img" 2> /dev/null) == persisted ]] \
+    || fail "the state disk lacks /app/mine"
+debugfs -R 'stat /app/world' "${case_dir}/state.img" 2>&1 | grep -q 'File not found' \
+    || fail "the process's removal of /etc/apk/world is not on the state disk"
+debugfs -R 'stat /etc/apk/world' "${case_dir}/disk.img" 2>&1 | grep -q 'Type: regular' \
+    || fail "the root disk's own /etc/apk/world is gone"
+debugfs -R 'stat /etc/apk/mine' "${case_dir}/disk.img" 2>&1 | grep -q 'File not found' \
+    || fail "the process wrote the root disk's /etc/apk"
+show_logs "${before}"
+before=${failures}
+first_dir=${case_dir}
+new_case state-second "${state_config}"
+mv "${first_dir}/disk.img" "${first_dir}/state.img" "${case_dir}/"
+mapfile -t qemu_extra < <(state_disk_args state0 "${case_dir}/state.img" state-1)
+qemu "${v6_cmdline}" "${case_timeout}" "${case_dir}/disk.img"
+qemu_extra=()
+expect_started 6
+tr -d '\r' < "${case_dir}/hvc.log" > "${case_dir}/console.txt"
+expect_line console.txt STATE_MOUNTED
+expect_line console.txt persisted
+expect_absent console.txt HAS_WORLD
+expect_absent serial.log 'grew state disk'
+expect_absent serial.log 'bind 0: copied'
+expect_report '{"v":6,"event":"exited","code":0,"signal":null,"reason":"exited"}'
+rm -f "${case_dir}/disk.img" "${case_dir}/state.img"
+show_logs "${before}"
+
+# 14. A state disk that is not there: an error naming the disk by its
+# index, the process never run; disks in a version-5 config is an
+# unknown field.
+before=${failures}
+boot state-missing '{"version":6,"disks":[{"serial":"absent","path":"/state"}],"argv":["/bin/sh","-c","echo ran"]}' "${v6_cmdline}"
+expect_report "{\"v\":6,\"event\":\"exited\",\"code\":null,\"signal\":null,\"reason\":\"error\",\"message\":\"config field \`disks\` entry 0: no disk with its serial appeared within 5 s\"}"
+expect_absent serial.log '"event":"started"'
+expect_absent hvc.log ran
+show_logs "${before}"
+before=${failures}
+boot disks-v5 '{"version":5,"disks":[],"argv":["/bin/sh","-c","echo ran"]}' "${v5_cmdline}"
+expect_report "\"v\":5,\"event\":\"exited\",\"code\":null,\"signal\":null,\"reason\":\"error\",\"message\":\"the config has an unknown field \`disks\`\""
+expect_absent serial.log '"event":"started"'
+expect_absent hvc.log ran
+show_logs "${before}"
+
 # 11. Version 3's init_system: an image's own init system (systemd on
 # Debian, busybox init running OpenRC on Alpine) boots as PID 1 of its own
 # namespaces, its checks pass (tests/init-systems/init-features.sh), and it
@@ -959,13 +1044,37 @@ init_system_cases() {
     expect_line console.txt 'INFO action reboot'
     expect_report '{"v":3,"event":"exited","code":null,"signal":1,"reason":"reboot"}'
     show_logs "${before}"
-    rm -f "${work}/${name}.img"
 }
 
 # systemd stops on SIGRTMIN+3 (37 with glibc), busybox init powers off on
 # SIGUSR2 (12).
 init_system_cases systemd Containerfile.debian 37 12
+
+# 15. systemd on version 6, as a router runs: two NICs and a state disk.
+# The disk is mounted at /srv/state and its lib bound over
+# /var/lib/init-features before systemd starts; the boot's unit writes
+# there (so the bind is its), eth1 is there and unconfigured; the three
+# checks of it pass with the twelve.
+before=${failures}
+new_case systemd-state '{"version":6,"argv":["/sbin/init"],"init_system":true,"stop_signal":37,"disks":[{"serial":"sd-state","path":"/srv/state","binds":[{"source":"lib","path":"/var/lib/init-features"}]}]}'
+cp --sparse=always "${work}/systemd.img" "${case_dir}/disk.img"
+mkfs.ext4 -q -F -L state -E root_owner=0:0 "${case_dir}/state.img" 64M > /dev/null
+mapfile -t qemu_extra < <(state_disk_args state0 "${case_dir}/state.img" sd-state)
+qemu_extra+=(-netdev "user,id=net1,restrict=on,net=10.116.0.0/24" -device "virtio-net-pci,netdev=net1")
+qemu "${v6_cmdline/gh.hostname=case-host/gh.hostname=state-host}" "${init_system_timeout}" "${case_dir}/disk.img"
+qemu_extra=()
+tr -d '\r' < "${case_dir}/hvc.log" > "${case_dir}/console.txt"
+expect_started 6
+expect_init_features 15
+expect_line console.txt 'INFO action poweroff'
+expect_report '{"v":6,"event":"exited","code":null,"signal":2,"reason":"poweroff"}'
+[[ $(debugfs -R 'cat /lib/from-a-unit' "${case_dir}/state.img" 2> /dev/null) == from-a-unit ]] \
+    || fail "the state disk lacks what the unit wrote"
+rm -f "${case_dir}/disk.img" "${case_dir}/state.img" "${work}/systemd.img"
+show_logs "${before}"
+
 init_system_cases openrc Containerfile.alpine 12 11
+rm -f "${work}/openrc.img"
 
 if [[ ${failures} != 0 ]]; then
     echo "boot.sh: ${failures} check(s) failed"

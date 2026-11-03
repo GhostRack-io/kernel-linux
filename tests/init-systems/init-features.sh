@@ -79,6 +79,14 @@ else
     check pid1_cgroup test "$(cat /proc/1/cgroup)" = 0::/
     check cron pidof crond
 fi
+# A version-6 boot with a state disk at /srv/state: the disk is mounted,
+# its bind over /var/lib/init-features is what this unit writes to, and the
+# second network interface is the image's to configure (nothing here does).
+if [ -d /srv/state ]; then
+    check state_disk sh -c 'grep -q " /srv/state ext4 " /proc/mounts'
+    check state_bind sh -c 'echo from-a-unit > /var/lib/init-features/from-a-unit && test -f /srv/state/lib/from-a-unit'
+    check eth1_unconfigured sh -c 'ip link show eth1 && ! ip addr show dev eth1 | grep -q "inet "'
+fi
 echo "INFO pid1_cgroup $(cat /proc/1/cgroup)"
 echo "INFO own_cgroup $(cat /proc/self/cgroup)"
 check cgroup_root cgroup_root

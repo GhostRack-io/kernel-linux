@@ -111,7 +111,9 @@ directories, a wrong digest, a non-empty disk, a 512 MiB layer in a
 192 MiB guest), exit codes and signals,
 the user, working directory and environment, the hosts, resolv.conf and
 host name (and that the disk's own files are untouched), refused configs
-and command lines, where the output goes, the SSH keys (which replace a
+and command lines, the config under the fw_cfg entry's new name, its
+old name only and both, an init system's `container=ghostrack`, where
+the output goes, the SSH keys (which replace a
 symbolic link rather than write through it), the process's signal state,
 the image's `/run` seen by a process of another user (owners and modes
 kept, writable, the disk's own unchanged) and version 5's volume paths,

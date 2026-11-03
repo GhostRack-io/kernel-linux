@@ -19,7 +19,7 @@ under a container runtime.
 
 - `kernel/`: the kernel version, the tarball's checksum, the base
   configuration, the fragments merged on top of it, and the full result.
-- `init/`: `gigahost-init`, the static init (Rust).
+- `init/`: `ghostrack-init`, the static init (Rust).
 - `build/Containerfile`: the pinned builder.
 - `scripts/build.sh`: the release build; `tests/boot.sh`: the boot tests.
 

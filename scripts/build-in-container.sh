@@ -16,8 +16,8 @@ version=$(cat "$src/kernel/VERSION")
 # Everything that could read the clock or the host reads these instead.
 SOURCE_DATE_EPOCH=$(date -u -d "$(cat "$src/SOURCE_DATE")" +%s)
 KBUILD_BUILD_TIMESTAMP=$(date -u -d "@$SOURCE_DATE_EPOCH" '+%Y-%m-%d %H:%M:%S UTC')
-KBUILD_BUILD_USER=gigahost
-KBUILD_BUILD_HOST=gigahost
+KBUILD_BUILD_USER=ghostrack
+KBUILD_BUILD_HOST=ghostrack
 KBUILD_BUILD_VERSION=1
 export SOURCE_DATE_EPOCH KBUILD_BUILD_TIMESTAMP KBUILD_BUILD_USER KBUILD_BUILD_HOST KBUILD_BUILD_VERSION
 export TZ=UTC LC_ALL=C.UTF-8
@@ -62,7 +62,7 @@ export CARGO_TARGET_DIR="$dir/cargo-target"
 export RUSTFLAGS="--remap-path-prefix=$src=/kernel-linux --remap-path-prefix=$CARGO_HOME=/cargo"
 cd "$src"
 cargo build --quiet --release --locked --target x86_64-unknown-linux-musl --manifest-path init/Cargo.toml
-init=$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/gigahost-init
+init=$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/ghostrack-init
 if readelf -lW "$init" | grep -q INTERP || readelf -dW "$init" | grep -q NEEDED; then
     echo "build: the init is not static" >&2
     exit 1

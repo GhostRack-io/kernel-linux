@@ -81,7 +81,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gigahost-init"
+name = "ghostrack-init"
 version = "1.0.0"
 dependencies = [
  "flate2",

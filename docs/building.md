@@ -5,13 +5,18 @@ A release is four files and their checksums, in `out/<RELEASE>/`:
 | File | What it is |
 |---|---|
 | `bzImage` | The Linux kernel, version `kernel/VERSION`, built with `kernel/config`. |
-| `initramfs.cpio.zst` | A newc cpio, zstd-compressed, holding only `/init`: the static `gigahost-init` built from `init/`. |
+| `initramfs.cpio.zst` | A newc cpio, zstd-compressed, holding only `/init`: the static `ghostrack-init` built from `init/`. |
 | `config` | The kernel configuration, identical to `kernel/config`. |
 | `build-info.json` | The release, the kernel tarball's URL and sha256, this repository's commit, whether the tree was dirty, the interface versions the init accepts (docs/interface.md), the builder's inputs (the sha256 of `build/Containerfile`, its pinned base image and Debian snapshot) and the Rust toolchain. |
 | `SHA256SUMS` | sha256 of the four files above. |
 
 The release name, `RELEASE`, is the kernel version, `-gh` and our build
-number (`6.18.57-gh6`); a release's tag is `v<RELEASE>`.
+number (`6.18.57-gh8`); a release's tag is `v<RELEASE>`.
+
+The kernel's release string (`uname -r`) is `kernel/VERSION` followed by
+`-ghostrack-container` (`CONFIG_LOCALVERSION`), `6.18.57-ghostrack-container`;
+before release 6.18.57-gh8 it ended in `-gigahost-container`, and the
+build user and host in `/proc/version` were `gigahost`.
 
 ## Build
 
@@ -66,7 +71,7 @@ Every input is pinned, so the same commit builds the same files:
 - the clock: `SOURCE_DATE` (one line, the release's date) gives
   `SOURCE_DATE_EPOCH`, `KBUILD_BUILD_TIMESTAMP` and the initramfs's dates;
   the kernel's build user, host and version are fixed
-  (`gigahost`, `gigahost`, `1`). Nothing reads the host's clock, user name
+  (`ghostrack`, `ghostrack`, `1`). Nothing reads the host's clock, user name
   or paths.
 
 `build-info.json` names the builder by its inputs

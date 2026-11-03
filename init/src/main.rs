@@ -1,4 +1,4 @@
-//! gigahost-init: PID 1 of a container virtual machine.
+//! ghostrack-init: PID 1 of a container virtual machine.
 //!
 //! It runs from the initramfs, switches into the renter's disk, sets up
 //! the system as a container runtime would, runs the image's process and
@@ -24,7 +24,7 @@ mod volumes;
 
 fn main() {
     if sys::getpid() != 1 {
-        eprintln!("gigahost-init runs only as PID 1 of a container virtual machine");
+        eprintln!("ghostrack-init runs only as PID 1 of a container virtual machine");
         #[allow(clippy::exit, reason = "not PID 1, so exiting is safe")]
         std::process::exit(2);
     }

@@ -163,6 +163,10 @@ unpack_cmdline=${v2_cmdline}
 
 failures=0
 case_dir=
+# The fw_cfg entry each boot's config is given as, and further -fw_cfg
+# arguments; a case may set either for its boots.
+config_entry=opt/ghostrack/config
+extra_fw_cfg=()
 
 fail() {
     echo "  FAIL: $*"
@@ -199,7 +203,8 @@ qemu() {
         -device virtio-net-pci,netdev=net0 \
         -object rng-random,id=rng0,filename=/dev/urandom \
         -device virtio-rng-pci,rng=rng0 \
-        -fw_cfg "name=opt/gigahost/config,file=${case_dir}/config.json" \
+        -fw_cfg "name=${config_entry},file=${case_dir}/config.json" \
+        "${extra_fw_cfg[@]}" \
         || rc=$?
     touch "${case_dir}/serial.log" "${case_dir}/hvc.log"
     if [[ ${rc} == 124 ]]; then
@@ -240,7 +245,7 @@ unpack_boot() {
 
 # The one exited report on the serial console.
 exited_report() {
-    grep -a -o 'gigahost-init: report {"v":[0-9]*,"event":"exited".*}' "${case_dir}/serial.log" | sed 's/^gigahost-init: report //' || true
+    grep -a -o 'ghostrack-init: report {"v":[0-9]*,"event":"exited".*}' "${case_dir}/serial.log" | sed 's/^ghostrack-init: report //' || true
 }
 
 expect_report() {
@@ -259,7 +264,7 @@ expect_no_report() {
 
 expect_started() {
     local v=${1:-1}
-    grep -a -q "gigahost-init: report {\"v\":${v},\"event\":\"started\",\"pid\":[0-9]*,\"monotonic_ms\":[0-9]*}" "${case_dir}/serial.log" \
+    grep -a -q "ghostrack-init: report {\"v\":${v},\"event\":\"started\",\"pid\":[0-9]*,\"monotonic_ms\":[0-9]*}" "${case_dir}/serial.log" \
         || fail "no started report"
 }
 
@@ -405,9 +410,9 @@ unpack_cmdline=${v4_cmdline}
 unpack_boot redeploy "${work}/b-keep.json" "${work}/b-layers.img" "" "" "${work}/a.img"
 unpack_cmdline=${v2_cmdline}
 expect_report '{"v":4,"event":"exited","code":0,"signal":null,"reason":"unpacked"}'
-grep -a -q 'gigahost-init: cleared the root disk but for the kept paths' "${case_dir}/serial.log" \
+grep -a -q 'ghostrack-init: cleared the root disk but for the kept paths' "${case_dir}/serial.log" \
     || fail "no line saying the root was cleared"
-grep -a -q -E "gigahost-init: layer ${#image_layers[@]}: kept paths: 2 entries skipped" "${case_dir}/serial.log" \
+grep -a -q -E "ghostrack-init: layer ${#image_layers[@]}: kept paths: 2 entries skipped" "${case_dir}/serial.log" \
     || fail "no line counting B's skipped entries"
 [[ $(debugfs -R 'cat /data/db/file' "${case_dir}/disk.img" 2> /dev/null) == A ]] \
     || fail "/data/db/file is not A's"
@@ -599,8 +604,29 @@ expect_line hvc.log to-stdout
 expect_line hvc.log to-stderr
 expect_absent serial.log to-stdout
 expect_absent serial.log to-stderr
-grep -a -q '^gigahost-init: start [0-9]*' "${case_dir}/serial.log" || fail "no start line on the serial console"
-expect_absent hvc.log gigahost-init
+grep -a -q '^ghostrack-init: start [0-9]*' "${case_dir}/serial.log" || fail "no start line on the serial console"
+expect_absent hvc.log ghostrack-init
+expect_absent serial.log gigahost-init
+expect_report '"code":0,"signal":null,"reason":"exited"'
+show_logs "${before}"
+
+# The config under the platform's old fw_cfg name only is read; with both
+# names, the new one's.
+before=${failures}
+config_entry=opt/gigahost/config
+boot config-old-name '{"version":1,"argv":["/bin/sh","-c","echo from-the-old-name"]}'
+config_entry=opt/ghostrack/config
+expect_started
+expect_line hvc.log from-the-old-name
+expect_report '"code":0,"signal":null,"reason":"exited"'
+show_logs "${before}"
+before=${failures}
+printf '%s' '{"version":1,"argv":["/bin/sh","-c","echo from-the-old-name"]}' > "${work}/old-name.json"
+extra_fw_cfg=(-fw_cfg "name=opt/gigahost/config,file=${work}/old-name.json")
+boot config-both-names '{"version":1,"argv":["/bin/sh","-c","echo from-the-new-name"]}'
+extra_fw_cfg=()
+expect_line hvc.log from-the-new-name
+expect_absent hvc.log from-the-old-name
 expect_report '"code":0,"signal":null,"reason":"exited"'
 show_logs "${before}"
 
@@ -751,7 +777,7 @@ truncate -s 1G "${case_dir}/disk.img"
 qemu "${default_cmdline}" "${case_timeout}" "${case_dir}/disk.img"
 expect_started
 expect_report '"code":0,"signal":null,"reason":"exited"'
-grep -a -q -E '^gigahost-init: grew the root file system from [0-9]+ to [0-9]+ blocks' "${case_dir}/serial.log" \
+grep -a -q -E '^ghostrack-init: grew the root file system from [0-9]+ to [0-9]+ blocks' "${case_dir}/serial.log" \
     || fail "no line saying the root grew"
 expect_absent serial.log 'growing the root file system failed'
 grown_kib=$(root_kib)
@@ -792,11 +818,17 @@ expect_absent serial.log 'grew the root file system'
 show_logs "${before}"
 
 # 10. Version 3 without init_system is version 2's run mode; init_system
-# is refused on a version-2 boot and with a user other than root.
+# gives the image's init container=ghostrack and is refused on a version-2 boot and with a user other than root.
 before=${failures}
 boot exit-3-v3 '{"version":3,"argv":["/bin/sh","-c","exit 3"]}' "${v3_cmdline}"
 expect_started 3
 expect_report '{"v":3,"event":"exited","code":3,"signal":null,"reason":"exited"}'
+show_logs "${before}"
+before=${failures}
+boot init-system-env '{"version":3,"argv":["/bin/sh","-c","env"],"init_system":true}' "${v3_cmdline}"
+expect_started 3
+expect_line hvc.log container=ghostrack
+expect_report '"v":3,"event":"exited","code":0'
 show_logs "${before}"
 before=${failures}
 boot init-system-v2 '{"version":2,"argv":["/sbin/init"],"init_system":true}' "${v2_cmdline}"
@@ -816,7 +848,7 @@ show_logs "${before}"
 before=${failures}
 config=$(cat << 'JSON'
 {"version":5,"user":"nobody","volumes":["/data/vol","/run/app"],
- "argv":["/bin/sh","-c","stat -c 'RUN_APP=%u:%g:%a' /run/app; stat -c 'SEED=%u:%a' /run/app/seed; cat /run/app/seed; echo; echo new > /run/app/new && cat /run/app/new; stat -c 'VOL=%u:%g:%a' /data/vol; test -f /run/gigahost/hosts && echo OURS"]}
+ "argv":["/bin/sh","-c","stat -c 'RUN_APP=%u:%g:%a' /run/app; stat -c 'SEED=%u:%a' /run/app/seed; cat /run/app/seed; echo; echo new > /run/app/new && cat /run/app/new; stat -c 'VOL=%u:%g:%a' /data/vol; test -f /run/ghostrack/hosts && echo OURS"]}
 JSON
 )
 boot run-and-volumes "${config}" "${v5_cmdline}"
@@ -828,7 +860,7 @@ expect_line console.txt from-the-image
 expect_line console.txt new
 expect_line console.txt VOL=0:0:755
 expect_line console.txt OURS
-grep -a -q 'gigahost-init: made 1 missing volume path(s)' "${case_dir}/serial.log" \
+grep -a -q 'ghostrack-init: made 1 missing volume path(s)' "${case_dir}/serial.log" \
     || fail "no line saying the volume path was made"
 expect_absent serial.log "copying the image's /run stopped"
 expect_report '{"v":5,"event":"exited","code":0,"signal":null,"reason":"exited"}'

@@ -28,7 +28,7 @@ impl Scratch {
     fn new() -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "gigahost-init-unpack-{}-{}",
+            "ghostrack-init-unpack-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
         ));
@@ -324,13 +324,13 @@ fn every_kind_of_entry() {
 fn extended_attributes_are_kept() {
     let scratch = Scratch::new();
     let tar = TarWriter::default()
-        .pax(&[("SCHILY.xattr.user.gigahost", b"kept\x00\xff")])
+        .pax(&[("SCHILY.xattr.user.ghostrack", b"kept\x00\xff")])
         .file("f", b"x", 0o644)
         .end();
     unpack_all(&scratch, &[plain(tar)]).unwrap();
     let path = CString::new(scratch.root().join("f").into_os_string().into_vec()).unwrap();
     assert_eq!(
-        crate::sys::fs::get_xattr(&path, c"user.gigahost").unwrap(),
+        crate::sys::fs::get_xattr(&path, c"user.ghostrack").unwrap(),
         b"kept\x00\xff"
     );
 }

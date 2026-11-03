@@ -33,9 +33,9 @@ pub const BOUNDS: Bounds = Bounds {
     depth: 32,
 };
 
-/// The name in `/run` that is the init's own (`/run/gigahost`): an image's
+/// The name in `/run` that is the init's own (`/run/ghostrack`): an image's
 /// entry by that name is not copied.
-const OURS: &CStr = c"gigahost";
+const OURS: &CStr = c"ghostrack";
 
 /// Why a copy stopped before its end.
 #[derive(Debug, PartialEq, Eq)]
@@ -84,7 +84,7 @@ fn failed(what: &'static str) -> impl Fn(io::Error) -> Stop {
 /// Copies the tree of `source` (the disk's `/run`) into the directory
 /// `target` (the tmpfs), and gives `target` the source's owner, group,
 /// mode and time whether or not the copy stopped early. An entry named
-/// `gigahost` directly in the source is left out.
+/// `ghostrack` directly in the source is left out.
 pub fn copy(source: &mut Dir, target: BorrowedFd<'_>, bounds: Bounds) -> Outcome {
     let mut copy = Copy {
         bounds,
@@ -238,7 +238,7 @@ mod tests {
         fn new() -> Self {
             static NEXT: AtomicU32 = AtomicU32::new(0);
             let dir = std::env::temp_dir().join(format!(
-                "gigahost-init-seed-{}-{}",
+                "ghostrack-init-seed-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::SeqCst)
             ));
@@ -359,20 +359,22 @@ mod tests {
             .unwrap();
         assert!(made.success());
         let _socket = std::os::unix::net::UnixListener::bind(source.join("socket")).unwrap();
-        stdfs::create_dir(source.join("gigahost")).unwrap();
-        stdfs::write(source.join("gigahost/hosts"), "image's").unwrap();
+        stdfs::create_dir(source.join("ghostrack")).unwrap();
+        stdfs::write(source.join("ghostrack/hosts"), "image's").unwrap();
         stdfs::create_dir(source.join("sub")).unwrap();
-        stdfs::write(source.join("sub/gigahost"), "kept below the top").unwrap();
+        stdfs::write(source.join("sub/ghostrack"), "kept below the top").unwrap();
+        // The init's name before release 6.18.57-gh8 is the image's own.
+        stdfs::write(source.join("gigahost"), "the image's").unwrap();
         let outcome = scratch.copy(BOUNDS);
         assert_eq!(
             outcome,
             Outcome {
-                copied: 2,
+                copied: 3,
                 skipped: 2,
                 stopped: None
             }
         );
-        assert_eq!(scratch.listing(), ["sub", "sub/gigahost"]);
+        assert_eq!(scratch.listing(), ["gigahost", "sub", "sub/ghostrack"]);
     }
 
     #[test]

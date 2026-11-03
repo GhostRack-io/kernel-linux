@@ -25,14 +25,14 @@ use std::time::{Duration, Instant};
 pub const NEWROOT: &str = "/newroot";
 pub const DISK: &str = "/dev/vda";
 const DISK_WAIT: Duration = Duration::from_secs(5);
-const OUR_FILES: &str = "/run/gigahost";
+const OUR_FILES: &str = "/run/ghostrack";
 
 /// The cgroup the process's cgroup namespace starts at.
 const PAYLOAD_CGROUP: &str = "/sys/fs/cgroup/payload";
 
 /// What the image's init system reads to know it runs in a container,
 /// before the config's environment, which may set either.
-const INIT_SYSTEM_ENV: &[&str] = &["container=gigahost", "container_ttys="];
+const INIT_SYSTEM_ENV: &[&str] = &["container=ghostrack", "container_ttys="];
 
 /// Runs the whole init; never returns.
 pub fn run() -> ! {
@@ -114,16 +114,14 @@ fn early() {
 
 /// Step 2's config, from `fw_cfg`, for a boot of interface `version`.
 fn read_config(version: u32) -> Result<Boot, String> {
-    let file = fs::File::open(config::PATH).map_err(|error| {
-        format!("the config (fw_cfg opt/gigahost/config) cannot be opened: {error}")
-    })?;
+    let (name, file) = config::open(&config::ENTRIES)?;
     let mut bytes = Vec::new();
     let limit = u64::try_from(config::MAX_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
     file.take(limit)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("reading the config failed: {error}"))?;
+        .map_err(|error| format!("reading the config (fw_cfg {name}) failed: {error}"))?;
     config::parse(&bytes, version)
 }
 
@@ -300,7 +298,7 @@ fn seed_run(image_run: &mut sys::fs::Dir, root: &fs::File) {
 }
 
 /// Step 5: the host name, and /etc/hosts, /etc/resolv.conf and
-/// /etc/hostname bind-mounted from /run/gigahost.
+/// /etc/hostname bind-mounted from /run/ghostrack.
 fn identity_files(args: &KernelArgs) -> Result<(), String> {
     sys::sethostname(&args.hostname)
         .map_err(|error| format!("setting the host name failed: {error}"))?;
@@ -425,6 +423,10 @@ fn write_authorized_keys(keys: &config::AuthorizedKeys) -> Result<(), String> {
         .map_err(fail_with("chown ~/.ssh"))?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
         .map_err(fail_with("chmod ~/.ssh"))?;
+    // The temporary file is on the renter's disk and outlives a boot that
+    // stops between its creation and the rename: it keeps the old name,
+    // which every release removes first, so no release leaves one behind
+    // under a name another does not know.
     let temporary = format!("{directory}/.authorized_keys.gigahost-init");
     let _ = fs::remove_file(&temporary);
     let mut file = fs::OpenOptions::new()

@@ -17,10 +17,19 @@ static ON_DISK: AtomicBool = AtomicBool::new(false);
 /// How long a report retries a host that does not answer.
 const REPORT_RETRY: Duration = Duration::from_secs(2);
 
-/// Writes `gigahost-init: <message>` on the console. Never pass a config
+/// What begins every line of the init's on the console, reports included
+/// (`gigahost-init: ` before release 6.18.57-gh8).
+pub const PREFIX: &str = "ghostrack-init: ";
+
+/// Writes `ghostrack-init: <message>` on the console. Never pass a config
 /// value here: the console is the host's log.
 pub fn log(message: &str) {
-    sys::write_all(2, format!("gigahost-init: {message}\n").as_bytes());
+    sys::write_all(2, line(message).as_bytes());
+}
+
+/// The console line of `message`.
+fn line(message: &str) -> String {
+    format!("{PREFIX}{message}\n")
 }
 
 pub fn set_port(port: u32) {
@@ -90,4 +99,19 @@ pub fn power_off() -> ! {
         log(&format!("remounting the root read-only failed: {error}"));
     }
     sys::power_off()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_line_starts_with_the_prefix() {
+        assert_eq!(PREFIX, "ghostrack-init: ");
+        assert_eq!(line("start 871"), "ghostrack-init: start 871\n");
+        assert_eq!(
+            line(&format!("report {}", r#"{"v":1}"#)),
+            "ghostrack-init: report {\"v\":1}\n"
+        );
+    }
 }

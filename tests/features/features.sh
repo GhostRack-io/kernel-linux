@@ -67,6 +67,6 @@ r dev_kvm_absent sh -c '! test -e /dev/kvm'
 r tun sh -c 'test -c /dev/net/tun || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200; }; ip tuntap add dev tun0 mode tun && ip link del tun0'
 r veth_bridge sh -c 'ip link add v0 type veth peer name v1 && ip link add br0 type bridge && ip link set v0 master br0 && ip link del br0 && ip link del v0'
 r modules_off sh -c '! test -e /proc/modules'
-r kernel_version sh -c 'uname -r | grep -x "[0-9.]*-gigahost-container"'
+r kernel_version sh -c 'uname -r | grep -x "[0-9.]*-ghostrack-container"'
 echo "FEATURES failed=${failures}"
 [ "${failures}" = 0 ]

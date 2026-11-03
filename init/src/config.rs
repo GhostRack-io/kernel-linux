@@ -10,8 +10,43 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-/// The `fw_cfg` file the agent writes (`-fw_cfg name=opt/gigahost/config`).
-pub const PATH: &str = "/sys/firmware/qemu_fw_cfg/by_name/opt/gigahost/config/raw";
+/// The `fw_cfg` entries the agent writes the config as, each with its
+/// file: `opt/ghostrack/config` (`-fw_cfg name=opt/ghostrack/config`)
+/// first, then the platform's old name `opt/gigahost/config`, read only
+/// when the first is absent, so the init boots under an agent that
+/// writes only the old name.
+pub const ENTRIES: [(&str, &str); 2] = [
+    (
+        "opt/ghostrack/config",
+        "/sys/firmware/qemu_fw_cfg/by_name/opt/ghostrack/config/raw",
+    ),
+    (
+        "opt/gigahost/config",
+        "/sys/firmware/qemu_fw_cfg/by_name/opt/gigahost/config/raw",
+    ),
+];
+
+/// Opens the first of `entries` (name, file) that exists, with its name.
+/// Only an absent file (`ENOENT`) moves on to the next: one present but
+/// not openable is an error, never a reason to read an older entry.
+pub fn open<'a>(entries: &[(&'a str, &str)]) -> Result<(&'a str, std::fs::File), String> {
+    for &(name, file) in entries {
+        match std::fs::File::open(file) {
+            Ok(opened) => return Ok((name, opened)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "the config (fw_cfg {name}) cannot be opened: {error}"
+                ));
+            }
+        }
+    }
+    let names: Vec<&str> = entries.iter().map(|&(name, _)| name).collect();
+    Err(format!(
+        "the config (fw_cfg {}) is missing",
+        names.join(" or ")
+    ))
+}
 
 /// The largest config accepted.
 pub const MAX_BYTES: usize = 1 << 20;
@@ -578,6 +613,116 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "s3cr3t-value-never-shown";
+
+    /// A fresh directory standing in for `by_name/`, with the two entries'
+    /// files below it.
+    fn entries_in(name: &str) -> (std::path::PathBuf, [(&'static str, String); 2]) {
+        let dir = std::env::temp_dir().join(format!(
+            "ghostrack-init-config-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |entry: &str| dir.join(entry).join("raw").to_string_lossy().into_owned();
+        let entries = [
+            ("opt/ghostrack/config", file("opt/ghostrack/config")),
+            ("opt/gigahost/config", file("opt/gigahost/config")),
+        ];
+        (dir, entries)
+    }
+
+    fn write_entry(file: &str, text: &str) {
+        let path = std::path::Path::new(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn open_text(entries: &[(&'static str, String); 2]) -> Result<(&'static str, String), String> {
+        use std::io::Read;
+        let borrowed = entries
+            .each_ref()
+            .map(|(name, file)| (*name, file.as_str()));
+        open(&borrowed).map(|(name, mut file)| {
+            let mut text = String::new();
+            file.read_to_string(&mut text).unwrap();
+            (name, text)
+        })
+    }
+
+    #[test]
+    fn the_entries_are_the_new_name_then_the_old() {
+        assert_eq!(
+            ENTRIES,
+            [
+                (
+                    "opt/ghostrack/config",
+                    "/sys/firmware/qemu_fw_cfg/by_name/opt/ghostrack/config/raw"
+                ),
+                (
+                    "opt/gigahost/config",
+                    "/sys/firmware/qemu_fw_cfg/by_name/opt/gigahost/config/raw"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_new_entry_is_read_first() {
+        let (dir, entries) = entries_in("both");
+        write_entry(&entries[0].1, "new");
+        write_entry(&entries[1].1, "old");
+        assert_eq!(
+            open_text(&entries),
+            Ok(("opt/ghostrack/config", "new".into()))
+        );
+        write_entry(&entries[0].1, "");
+        assert_eq!(
+            open_text(&entries),
+            Ok(("opt/ghostrack/config", String::new())),
+            "an empty new entry is still the config"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_old_entry_is_read_when_the_new_is_absent() {
+        let (dir, entries) = entries_in("old");
+        write_entry(&entries[1].1, "old");
+        assert_eq!(
+            open_text(&entries),
+            Ok(("opt/gigahost/config", "old".into()))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn no_entry_is_an_error_naming_both() {
+        let (dir, entries) = entries_in("neither");
+        assert_eq!(
+            open_text(&entries),
+            Err(
+                "the config (fw_cfg opt/ghostrack/config or opt/gigahost/config) is missing".into()
+            )
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_entry_that_cannot_be_opened_is_an_error_not_the_old() {
+        let (dir, entries) = entries_in("unopenable");
+        write_entry(&entries[1].1, "old");
+        // A link to itself: present, but opening it fails (ELOOP) for
+        // root too.
+        let new = std::path::Path::new(&entries[0].1);
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("raw", new).unwrap();
+        let error = open_text(&entries).unwrap_err();
+        assert!(
+            error.starts_with("the config (fw_cfg opt/ghostrack/config) cannot be opened: "),
+            "{error}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A version-1 boot's run config.
     fn parse_text(text: &str) -> Result<Config, String> {

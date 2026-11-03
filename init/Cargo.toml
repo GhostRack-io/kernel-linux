@@ -1,15 +1,15 @@
 [package]
-name = "gigahost-init"
+name = "ghostrack-init"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 description = "PID 1 of a container virtual machine: switches into the image's disk and runs its process"
-repository = "https://github.com/gigahost-apps/kernel-linux"
+repository = "https://github.com/ghostrack-io/kernel-linux"
 publish = false
 
 [[bin]]
-name = "gigahost-init"
+name = "ghostrack-init"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,13 +1,22 @@
 # The host ↔ init interface, versions 1 to 5
 
 This is the contract between the host that boots a container machine (the
-agent) and `gigahost-init`, the init in this repository's initramfs. It is
+agent) and `ghostrack-init`, the init in this repository's initramfs. It is
 written for agent authors: everything the agent writes and everything it
 reads back is here.
 
 A release's `build-info.json` lists the interface versions its init accepts
 (`"interface_versions": [1, 2, 3, 4, 5]`). Any change to the kernel command line, the
 config or the vsock lines below is a new interface version.
+
+Release 6.18.57-gh8 renamed the init's names, in every interface version:
+its console lines start with `ghostrack-init: ` (before, `gigahost-init: `),
+the config's fw_cfg entry is `opt/ghostrack/config` (the init still reads
+`opt/gigahost/config` when the new entry is absent), its files are in
+`/run/ghostrack` (before, `/run/gigahost`) and an image's init system gets
+`container=ghostrack` (before, `container=gigahost`). An agent that boots
+releases from before and after it accepts both console prefixes; one that
+gives the config under both names boots either.
 
 Version 2 is version 1 plus the unpack mode (below), in which the init
 unpacks an image's layers onto an empty root disk, so the host never parses
@@ -55,8 +64,9 @@ kernel boot (QEMU `-kernel`, `-initrd`, `-append`, or libvirt's `<kernel>`,
   it the output goes to the serial console;
 - a vsock device for the reports and the stop command, optional: without
   it the serial console carries the reports;
-- the config as the fw_cfg entry `opt/gigahost/config`
-  (`-fw_cfg name=opt/gigahost/config,file=...`);
+- the config as the fw_cfg entry `opt/ghostrack/config`
+  (`-fw_cfg name=opt/ghostrack/config,file=...`), or under the old name
+  `opt/gigahost/config`, or both;
 - optionally virtio-rng;
 - a reset that ends the domain: libvirt's `<on_reboot>destroy</on_reboot>`
   and `<on_crash>destroy</on_crash>`, or QEMU's `-no-reboot`.
@@ -103,9 +113,14 @@ init turns off duplicate address detection on `eth0`
 
 ## Config
 
-The fw_cfg entry `opt/gigahost/config`, read from
-`/sys/firmware/qemu_fw_cfg/by_name/opt/gigahost/config/raw`: one JSON
-object, at most 1 MiB (1,048,576 bytes).
+The fw_cfg entry `opt/ghostrack/config`, read from
+`/sys/firmware/qemu_fw_cfg/by_name/opt/ghostrack/config/raw`: one JSON
+object, at most 1 MiB (1,048,576 bytes). When that file is absent, the
+init reads `opt/gigahost/config` instead
+(`.../by_name/opt/gigahost/config/raw`), the entry's name before release
+6.18.57-gh8; a new entry that is present
+but cannot be opened or read is an error, and the old one is not read.
+With neither entry, the boot ends in an error report.
 
 A config is of one of two modes. The **run mode** runs the image's
 process; it is all of version 1 and the default of versions 2 to 5:
@@ -180,7 +195,7 @@ messages name a field at most.
 These are the run mode's steps; the unpack mode's follow.
 
 1. As PID 1 in the initramfs: mounts devtmpfs on `/dev`, opens
-   `/dev/console` for its own output, logs `gigahost-init: start <ms>`
+   `/dev/console` for its own output, logs `ghostrack-init: start <ms>`
    (milliseconds of the guest's monotonic clock), mounts proc and sysfs.
 2. Parses the kernel command line and reads the config; refuses an
    unknown interface or config version, and a config whose version is not
@@ -193,10 +208,10 @@ These are the run mode's steps; the unpack mode's follow.
    larger than its ext4 file system (a disk made larger than the image's
    file system, or grown since), the init grows the file system online to
    the disk's whole size (`EXT4_IOC_RESIZE_FS`, to the disk's size in whole
-   blocks of the file system) and logs `gigahost-init: grew the root file
+   blocks of the file system) and logs `ghostrack-init: grew the root file
    system from <old> to <new> blocks`. It only ever grows, never shrinks;
    a file system that already fills its disk is left as it is. A failed
-   growth is logged (`gigahost-init: growing the root file system failed:
+   growth is logged (`ghostrack-init: growing the root file system failed:
    <reason>`), leaves a consistent file system (unchanged, or grown part of the
    way, the rest grown at the next boot) and the boot goes on, the
    space unused. (Since release 6.18.57-gh4, for every interface version;
@@ -220,18 +235,20 @@ These are the run mode's steps; the unpack mode's follow.
    when the copy stops early); FIFOs,
    sockets and devices are not copied (the init logs how many). The
    copy reads the disk through descriptors, one name at a time, and
-   follows no symbolic link. An entry `/run/gigahost` of the image is
-   not copied: that name is the init's (step 5). The copy is bounded: at
+   follows no symbolic link. An entry `/run/ghostrack` of the image is
+   not copied: that name is the init's (step 5; before release
+   6.18.57-gh8 the init's name was `/run/gigahost`, which is now copied
+   as any other entry). The copy is bounded: at
    most 4096 entries, 16 MiB of file data and 32 directories deep; past
    a bound, or on an error, it stops where it is with one log line
-   (`gigahost-init: copying the image's /run stopped after <n> entries:
+   (`ghostrack-init: copying the image's /run stopped after <n> entries:
    <why>`) and the boot goes on. When the image's `/run` is a symbolic
    link, nothing is copied and the tmpfs is mounted where it leads; when
    it is missing, it is created (mode 0755) and the tmpfs starts empty.
    (Since release 6.18.57-gh6, for every interface version, with or
    without `init_system`.)
 5. Sets the host name. Writes `hosts`, `resolv.conf` and `hostname` into
-   `/run/gigahost/` and bind-mounts each over `/etc/hosts`,
+   `/run/ghostrack/` and bind-mounts each over `/etc/hosts`,
    `/etc/resolv.conf` and `/etc/hostname`. The mount covers the path
    itself: when the image has a symbolic link there (Debian and Ubuntu
    point `/etc/resolv.conf` elsewhere), the link is covered, never followed,
@@ -250,7 +267,7 @@ These are the run mode's steps; the unpack mode's follow.
    root (`openat2` with `RESOLVE_IN_ROOT`), so a symbolic link on its way
    leads somewhere inside the root, never out of it. A path that cannot
    be made (a file on its way, a symbolic link to nothing) is logged by
-   its index (`gigahost-init: volume path N was not made: <reason>`) and
+   its index (`ghostrack-init: volume path N was not made: <reason>`) and
    skipped; the boot goes on. So is a path in `/proc`, `/sys` or `/dev`
    (its first component `proc`, `sys` or `dev`): those are the init's
    mounts, not the image's. The init logs how many paths it made.
@@ -357,13 +374,13 @@ process starts in the same namespaces, steps 1–4 here, since release
    as the working directory, stdin `/dev/null`, stdout and stderr to hvc0
    (or the serial console without it), every signal at its default
    action, a new session, as for a process. The environment is that of a
-   process, with `container=gigahost` and `container_ttys=` (empty)
+   process, with `container=ghostrack` and `container_ttys=` (empty)
    before the config's `env`, which may set either. systemd reads
    `container` to know it runs in a container
    (`systemd-detect-virt` says `container-other`); an empty
    `container_ttys` starts no gettys but the console's. OpenRC knows only
    its own container names (`container=lxc`, `rkt`, `systemd-nspawn`,
-   `docker`), so with `gigahost` it runs as on a virtual machine, which a
+   `docker`), so with `ghostrack` it runs as on a virtual machine, which a
    container machine is (the boot tests' Alpine image boots so); an image
    or the agent may set `container`, or OpenRC's `rc_sys`, otherwise.
 6. **the end**: when the image's init ends, the kernel kills every other
@@ -609,11 +626,12 @@ answer, it retries for 2 s; without a vsock device it does not try. Every
 report is also printed on the serial console as
 
 ```
-gigahost-init: report <json>
+ghostrack-init: report <json>
 ```
 
 which is the agent's fallback when it missed the vsock message (parse the
-serial log for lines starting with `gigahost-init: report `).
+serial log for lines starting with `ghostrack-init: report `, or
+`gigahost-init: report ` before release 6.18.57-gh8).
 
 ```json
 {"v":1,"event":"started","pid":2,"monotonic_ms":871}
@@ -701,7 +719,7 @@ The machine is the renter's: the process runs as root by default, and
 anything in the guest can speak the init's lines. The port `gh.vsock` is
 in `/proc/cmdline`, so any guest process, root or not, can connect to the
 host on it and write a report, or open many connections; a root process
-can write `gigahost-init: report ...` lines to the serial console. Reports are therefore
+can write `ghostrack-init: report ...` lines to the serial console. Reports are therefore
 advisory, and the agent:
 
 - bases billing and every state change on the domain's lifecycle (it
@@ -710,7 +728,7 @@ advisory, and the agent:
   reads at most one line of a bounded length from it, caps the
   connections a machine may hold open, and keeps at most one `started`
   and one `exited` report per boot;
-- from the serial log, takes the last `gigahost-init: report ` in the
+- from the serial log, takes the last `ghostrack-init: report ` in the
   log and the JSON object after it on that line: the init kills every
   process before it writes its own `exited` report, so nothing in the
   guest writes after it;

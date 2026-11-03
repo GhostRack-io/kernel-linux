@@ -88,13 +88,13 @@ fn failed(what: &'static str) -> impl Fn(io::Error) -> Stop {
 /// mode and time whether or not the copy stopped early. An entry named
 /// `ghostrack` directly in the source is left out.
 pub fn copy(source: &mut Dir, target: BorrowedFd<'_>, bounds: Bounds) -> Outcome {
-    copy_except(source, target, bounds, Some(OURS))
+    copy_except(source, target, bounds, Some(OURS), "reading /run")
 }
 
 /// As [`copy`], every name copied: version 6's first fill of a state
 /// disk's bind source from the image's directory (`crate::disks`).
 pub fn copy_all(source: &mut Dir, target: BorrowedFd<'_>, bounds: Bounds) -> Outcome {
-    copy_except(source, target, bounds, None)
+    copy_except(source, target, bounds, None, "reading the image's path")
 }
 
 fn copy_except(
@@ -102,6 +102,7 @@ fn copy_except(
     target: BorrowedFd<'_>,
     bounds: Bounds,
     skip: Option<&'static CStr>,
+    what: &'static str,
 ) -> Outcome {
     let mut copy = Copy {
         bounds,
@@ -114,7 +115,7 @@ fn copy_except(
     // The root's own metadata even when its copy stopped, as for every
     // directory below it.
     let own = fs::stat_at(source.fd(), c"")
-        .map_err(failed("reading the copied directory"))
+        .map_err(failed(what))
         .and_then(|stat| metadata_fd(target, &stat));
     copy.outcome.stopped = result.and(own).err();
     copy.outcome

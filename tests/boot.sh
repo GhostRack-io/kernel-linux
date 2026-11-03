@@ -136,7 +136,7 @@ PYTHON
 # root's ~/.ssh/authorized_keys is a symbolic link to /etc/shadow, so case
 # 7 can show the keys replace the link instead of writing through it.
 # Its /run/app, owned by nobody, holds a file, and /data has no vol, so
-# case 12 can show the process finds the image's /run and the volume
+# case 11 can show the process finds the image's /run and the volume
 # path. zstd-compressed, as the image's own layers are gzip.
 disk_hosts='# the disk'"'"'s own hosts file'
 resolv_link=../run/systemd/resolve/stub-resolv.conf
@@ -847,7 +847,7 @@ expect_report "\"reason\":\"error\",\"message\":\"config field \`user\` is not r
 expect_absent serial.log '"event":"started"'
 show_logs "${before}"
 
-# 12. The image's /run is the process's (seeded into the tmpfs, owners
+# 11. The image's /run is the process's (seeded into the tmpfs, owners
 # and modes kept, writable, the disk's own unchanged), and version 5's
 # volumes: the missing /data/vol is made (root, 0755), the existing
 # /run/app left alone. volumes in a version-4 config is refused.
@@ -887,7 +887,7 @@ state_disk_args() {
     printf '%s\n' -drive "file=$2,format=raw,if=none,id=$1" -device "virtio-blk-pci,drive=$1,serial=$3"
 }
 
-# 13. Version 6's state disk: found by its serial, mounted at /state
+# 12. Version 6's state disk: found by its serial, mounted at /state
 # (nodev, nosuid, noatime) and grown with its disk; its directory app is
 # bound over /etc/apk, filled from the image's /etc/apk when made on the
 # first boot only. What the process writes there is on the state disk at
@@ -944,7 +944,7 @@ expect_report '{"v":6,"event":"exited","code":0,"signal":null,"reason":"exited"}
 rm -f "${case_dir}/disk.img" "${case_dir}/state.img"
 show_logs "${before}"
 
-# 14. A state disk that is not there: an error naming the disk by its
+# 13. A state disk that is not there: an error naming the disk by its
 # index, the process never run; disks in a version-5 config is an
 # unknown field.
 before=${failures}
@@ -960,7 +960,7 @@ expect_absent serial.log '"event":"started"'
 expect_absent hvc.log ran
 show_logs "${before}"
 
-# 11. Version 3's init_system: an image's own init system (systemd on
+# 14. Version 3's init_system: an image's own init system (systemd on
 # Debian, busybox init running OpenRC on Alpine) boots as PID 1 of its own
 # namespaces, its checks pass (tests/init-systems/init-features.sh), and it
 # powers the container off from inside, which the report says; a second

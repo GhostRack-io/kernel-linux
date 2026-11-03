@@ -77,7 +77,9 @@ kernel boot (QEMU `-kernel`, `-initrd`, `-append`, or libvirt's `<kernel>`,
 - in the run mode of version 6, the config's state disks as further
   virtio-blk disks, each with its virtio serial (QEMU
   `-device virtio-blk-pci,serial=...`, libvirt's `<serial>`), in any
-  order after the root disk: the init finds them by serial, not by name;
+  order after the root disk: the init finds them by serial, not by name
+  (in the unpack mode they are detached, or attached after the layers
+  disk);
 - one virtio-net interface (`eth0`), which the command line configures.
   Further virtio-net interfaces (`eth1`, ...) are the image's to
   configure: the init leaves them down and unconfigured;

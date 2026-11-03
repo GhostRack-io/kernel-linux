@@ -72,6 +72,8 @@ pub struct Outcome {
 
 struct Copy {
     bounds: Bounds,
+    /// The name directly in the source that is not copied, if any.
+    skip: Option<&'static CStr>,
     entries: usize,
     bytes: u64,
     outcome: Outcome,
@@ -86,8 +88,24 @@ fn failed(what: &'static str) -> impl Fn(io::Error) -> Stop {
 /// mode and time whether or not the copy stopped early. An entry named
 /// `ghostrack` directly in the source is left out.
 pub fn copy(source: &mut Dir, target: BorrowedFd<'_>, bounds: Bounds) -> Outcome {
+    copy_except(source, target, bounds, Some(OURS))
+}
+
+/// As [`copy`], every name copied: version 6's first fill of a state
+/// disk's bind source from the image's directory (`crate::disks`).
+pub fn copy_all(source: &mut Dir, target: BorrowedFd<'_>, bounds: Bounds) -> Outcome {
+    copy_except(source, target, bounds, None)
+}
+
+fn copy_except(
+    source: &mut Dir,
+    target: BorrowedFd<'_>,
+    bounds: Bounds,
+    skip: Option<&'static CStr>,
+) -> Outcome {
     let mut copy = Copy {
         bounds,
+        skip,
         entries: 0,
         bytes: 0,
         outcome: Outcome::default(),
@@ -96,7 +114,7 @@ pub fn copy(source: &mut Dir, target: BorrowedFd<'_>, bounds: Bounds) -> Outcome
     // The root's own metadata even when its copy stopped, as for every
     // directory below it.
     let own = fs::stat_at(source.fd(), c"")
-        .map_err(failed("reading /run"))
+        .map_err(failed("reading the copied directory"))
         .and_then(|stat| metadata_fd(target, &stat));
     copy.outcome.stopped = result.and(own).err();
     copy.outcome
@@ -115,7 +133,7 @@ impl Copy {
     /// Copies the entries of `source` into `target`; they are at `depth`.
     fn tree(&mut self, source: &mut Dir, target: BorrowedFd<'_>, depth: usize) -> Result<(), Stop> {
         while let Some(name) = source.next_name().map_err(failed("reading a directory"))? {
-            if depth == 1 && name.as_c_str() == OURS {
+            if depth == 1 && self.skip == Some(name.as_c_str()) {
                 continue;
             }
             if depth > self.bounds.depth {

@@ -11,9 +11,9 @@
 
 use crate::console::log;
 use crate::sys::fs;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 /// What [`make`] did with one path.
 #[derive(Debug, PartialEq, Eq)]
@@ -31,14 +31,27 @@ fn c_path(path: &[u8]) -> io::Result<CString> {
 /// Makes the missing directories of `path` (without its leading `/`,
 /// normalised as the config's paths are) inside `root`.
 pub fn make(root: BorrowedFd<'_>, path: &[u8]) -> io::Result<Made> {
+    make_with(root, path, fs::open_in_root)
+}
+
+/// As [`make`], through no symbolic link: one on the way is `ELOOP`
+/// (version 6's state disks). A symbolic link at `path` itself exists, as
+/// for [`make`]; opening it as a directory then fails.
+pub fn make_no_links(root: BorrowedFd<'_>, path: &[u8]) -> io::Result<Made> {
+    make_with(root, path, fs::open_no_links)
+}
+
+type Open = fn(BorrowedFd<'_>, &CStr, libc::c_int) -> io::Result<OwnedFd>;
+
+fn make_with(root: BorrowedFd<'_>, path: &[u8], open: Open) -> io::Result<Made> {
     let flags = libc::O_PATH | libc::O_NOFOLLOW;
-    match fs::open_in_root(root, &c_path(path)?, flags) {
+    match open(root, &c_path(path)?, flags) {
         Ok(_) => return Ok(Made::Existed),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
     let directory = libc::O_RDONLY | libc::O_DIRECTORY;
-    let mut parent = fs::open_in_root(root, c".", directory)?;
+    let mut parent = open(root, c".", directory)?;
     let mut end = 0;
     for part in path.split(|&byte| byte == b'/') {
         end += part.len();
@@ -52,7 +65,7 @@ pub fn make(root: BorrowedFd<'_>, path: &[u8]) -> io::Result<Made> {
         // The path so far, resolved inside the root: a symbolic link the
         // part is leads where it leads inside it.
         let so_far = path.get(..end).unwrap_or(path);
-        parent = fs::open_in_root(root, &c_path(so_far)?, directory)?;
+        parent = open(root, &c_path(so_far)?, directory)?;
         end += 1;
     }
     Ok(Made::Created)

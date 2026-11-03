@@ -1,7 +1,8 @@
-//! Step 3's growth of the root: an ext4 file system smaller than its disk
-//! (a disk made larger than the image's file system, or resized since) is
-//! grown online to the disk's size. Only ever grown, never shrunk; a
-//! failure is logged and the boot goes on with the space unused.
+//! Step 3's growth of the root, and version 6's of each state disk: an
+//! ext4 file system smaller than its disk (a disk made larger than the
+//! image's file system, or resized since) is grown online to the disk's
+//! size. Only ever grown, never shrunk; a failure is logged and the boot
+//! goes on with the space unused.
 
 use crate::console::log;
 use crate::sys::disk;
@@ -71,12 +72,36 @@ pub fn grown_blocks(device_bytes: u64, block_size: u64, blocks: u64) -> Option<u
 /// Grows the mounted root on `disk` to the disk's size when it is larger,
 /// logging a failure instead of failing the boot.
 pub fn root(disk: &str) {
-    if let Err(error) = grow(disk) {
-        log(&format!("growing the root file system failed: {error}"));
+    let grown = fs::File::open("/")
+        .map_err(|error| format!("opening /: {error}"))
+        .and_then(|root| grow(disk, &root));
+    match grown {
+        Ok(Some((from, to))) => log(&format!(
+            "grew the root file system from {from} to {to} blocks"
+        )),
+        Ok(None) => {}
+        Err(error) => log(&format!("growing the root file system failed: {error}")),
     }
 }
 
-fn grow(disk: &str) -> Result<(), String> {
+/// Grows the file system of state disk `index` on `disk`, mounted at the
+/// directory `mounted`, as [`root`] grows the root's.
+pub fn state_disk(index: usize, disk: &str, mounted: &fs::File) {
+    match grow(disk, mounted) {
+        Ok(Some((from, to))) => log(&format!(
+            "grew state disk {index}'s file system from {from} to {to} blocks"
+        )),
+        Ok(None) => {}
+        Err(error) => log(&format!(
+            "growing state disk {index}'s file system failed: {error}"
+        )),
+    }
+}
+
+/// Grows the ext4 file system on `disk`, mounted where the open
+/// directory `mounted` is, to the disk's whole blocks; the block counts
+/// before and after when it grew.
+fn grow(disk: &str, mounted: &fs::File) -> Result<Option<(u64, u64)>, String> {
     let device = fs::File::open(disk).map_err(|error| format!("opening {disk}: {error}"))?;
     let device_bytes = disk::block_device_bytes(device.as_fd())
         .map_err(|error| format!("reading the disk's size: {error}"))?;
@@ -86,10 +111,9 @@ fn grow(disk: &str) -> Result<(), String> {
         .map_err(|error| format!("reading the superblock: {error}"))?;
     let superblock = Superblock::parse(&bytes)?;
     let Some(blocks) = grown_blocks(device_bytes, superblock.block_size, superblock.blocks) else {
-        return Ok(());
+        return Ok(None);
     };
-    let root = fs::File::open("/").map_err(|error| format!("opening /: {error}"))?;
-    disk::resize_ext4(root.as_fd(), blocks).map_err(|error| {
+    disk::resize_ext4(mounted.as_fd(), blocks).map_err(|error| {
         // The kernel's own reason is a warning the quiet console hides.
         let hint = if error.raw_os_error() == Some(libc::EPERM) {
             " (the file system has errors: run e2fsck on the disk)"
@@ -101,11 +125,7 @@ fn grow(disk: &str) -> Result<(), String> {
             superblock.blocks
         )
     })?;
-    log(&format!(
-        "grew the root file system from {} to {blocks} blocks",
-        superblock.blocks
-    ));
-    Ok(())
+    Ok(Some((superblock.blocks, blocks)))
 }
 
 #[cfg(test)]

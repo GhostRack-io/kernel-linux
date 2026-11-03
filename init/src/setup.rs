@@ -5,6 +5,7 @@
 use crate::cmdline::{self, KernelArgs};
 use crate::config::{self, Boot, Config};
 use crate::console::{self, fail, log};
+use crate::disks;
 use crate::etc;
 use crate::grow;
 use crate::protocol::{self, Report};
@@ -27,6 +28,11 @@ pub const DISK: &str = "/dev/vda";
 const DISK_WAIT: Duration = Duration::from_secs(5);
 const OUR_FILES: &str = "/run/ghostrack";
 
+/// The sysctl that keeps the fallback tunnel devices (`tunl0`, `sit0`,
+/// ...) to the machine's own network namespace: a namespace made later
+/// gets none, as distributions configure it.
+const FB_TUNNELS: &str = "/proc/sys/net/core/fb_tunnels_only_for_init_net";
+
 /// The cgroup the process's cgroup namespace starts at.
 const PAYLOAD_CGROUP: &str = "/sys/fs/cgroup/payload";
 
@@ -38,6 +44,7 @@ const INIT_SYSTEM_ENV: &[&str] = &["container=ghostrack", "container_ttys="];
 pub fn run() -> ! {
     early();
     log(&format!("start {}", sys::monotonic_ms()));
+    no_fallback_tunnels();
     let cmdline = fs::read_to_string("/proc/cmdline")
         .unwrap_or_else(|error| fail(&format!("reading /proc/cmdline failed: {error}")));
     if let Some(port) = cmdline::vsock_port(&cmdline) {
@@ -55,6 +62,7 @@ pub fn run() -> ! {
     console::set_on_disk();
     grow::root(DISK);
     system_mounts().unwrap_or_else(|error| fail(&error));
+    disks::mount_all(&config.disks).unwrap_or_else(|error| fail(&error));
     identity_files(&args).unwrap_or_else(|error| fail(&error));
     network(&args).unwrap_or_else(|error| fail(&format!("network setup failed: {error}")));
     if let Some(keys) = &config.authorized_keys {
@@ -109,6 +117,17 @@ fn early() {
     }
     if let Some(problem) = problems.first() {
         fail(problem);
+    }
+}
+
+/// Step 1's last part: no fallback tunnel devices in the network
+/// namespaces made later ([`FB_TUNNELS`]); a failure is logged and the
+/// boot goes on.
+fn no_fallback_tunnels() {
+    if let Err(error) = fs::write(FB_TUNNELS, "1") {
+        log(&format!(
+            "net.core.fb_tunnels_only_for_init_net was not set: {error}"
+        ));
     }
 }
 

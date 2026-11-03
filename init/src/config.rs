@@ -1,8 +1,9 @@
 //! The machine's configuration, read from `fw_cfg` (interface versions 1
-//! to 5): the process to run (from version 3, possibly the image's own
-//! init system; from version 5 with the image's volume paths), or
-//! (version 2's unpack mode) the image layers to unpack onto the root disk
-//! (from version 4, possibly a redeploy keeping some of its paths).
+//! to 6): the process to run (from version 3, possibly the image's own
+//! init system; from version 5 with the image's volume paths; from version
+//! 6 with state disks), or (version 2's unpack mode) the image layers to
+//! unpack onto the root disk (from version 4, possibly a redeploy keeping
+//! some of its paths).
 //!
 //! The config may carry secrets (environment values, keys), so no error
 //! message here quotes a value: they name the field at most.
@@ -63,7 +64,7 @@ const DEFAULT_STOP_SIGNAL: i32 = 15;
 pub const MAX_SIGNAL: i32 = 64;
 
 /// The config versions this init accepts.
-pub const VERSIONS: &[u64] = &[1, 2, 3, 4, 5];
+pub const VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6];
 
 /// The first config version with `init_system`.
 const INIT_SYSTEM_VERSION: u64 = 3;
@@ -73,6 +74,18 @@ const KEEP_VERSION: u64 = 4;
 
 /// The first config version with the run mode's `volumes`.
 const VOLUMES_VERSION: u64 = 5;
+
+/// The first config version with the run mode's `disks`.
+const DISKS_VERSION: u64 = 6;
+
+/// The most state disks a run config may list.
+pub const MAX_DISKS: usize = 8;
+
+/// The most binds one state disk may list.
+pub const MAX_BINDS: usize = 16;
+
+/// The longest state disk serial, in bytes (virtio-blk's ID is 20 bytes).
+pub const MAX_SERIAL_BYTES: usize = 20;
 
 /// The most volume paths a run config may list.
 pub const MAX_VOLUMES: usize = 64;
@@ -182,6 +195,38 @@ pub struct Config {
     /// other fields.
     #[serde(skip)]
     pub volumes: Vec<Vec<u8>>,
+    /// Version 6's `disks`: the state disks to mount, parsed apart from
+    /// the other fields.
+    #[serde(skip)]
+    pub disks: Vec<Disk>,
+}
+
+/// One of version 6's state disks: the virtio-blk disk whose serial is
+/// `serial`, mounted at `path`, with directories of it bound over paths
+/// of the root.
+pub struct Disk {
+    pub serial: String,
+    /// Where it is mounted, without the leading `/`.
+    pub path: Vec<u8>,
+    pub binds: Vec<Bind>,
+}
+
+/// A directory of a state disk bound over a path of the root.
+pub struct Bind {
+    /// The directory inside the disk, relative to its root.
+    pub source: Vec<u8>,
+    /// The path of the root it covers, without the leading `/`.
+    pub path: Vec<u8>,
+}
+
+/// Shows the shape only, as [`Config`]'s does.
+impl std::fmt::Debug for Disk {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Disk")
+            .field("binds", &self.binds.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Deserialize)]
@@ -204,6 +249,7 @@ impl std::fmt::Debug for Config {
             )
             .field("init_system", &self.init_system)
             .field("volumes", &self.volumes.len())
+            .field("disks", &self.disks)
             .finish_non_exhaustive()
     }
 }
@@ -231,14 +277,17 @@ const FIELDS: &[&str] = &[
     "authorized_keys",
     "init_system",
     "volumes",
+    "disks",
 ];
 
 /// Whether `key` is a run field of config `version`: `init_system` is
-/// version 3's, unknown to versions 1 and 2, and `volumes` version 5's.
+/// version 3's, unknown to versions 1 and 2, `volumes` version 5's and
+/// `disks` version 6's.
 fn known_field(key: &str, version: u64) -> bool {
     FIELDS.contains(&key)
         && (key != "init_system" || version >= INIT_SYSTEM_VERSION)
         && (key != "volumes" || version >= VOLUMES_VERSION)
+        && (key != "disks" || version >= DISKS_VERSION)
 }
 
 /// Names what in `value` keeps it from parsing, without quoting a value.
@@ -360,10 +409,12 @@ pub fn parse(bytes: &[u8], boot_version: u32) -> Result<Boot, String> {
 }
 
 /// The run mode's config, as version 1 has it; from version 5 with
-/// `volumes`, which is taken out of `value` and parsed apart.
+/// `volumes` and from version 6 with `disks`, which are taken out of
+/// `value` and parsed apart.
 fn run_config(value: &mut Value, version: u64) -> Result<Config, String> {
     if (version < INIT_SYSTEM_VERSION && value.get("init_system").is_some())
         || (version < VOLUMES_VERSION && value.get("volumes").is_some())
+        || (version < DISKS_VERSION && value.get("disks").is_some())
     {
         // Not a field of this version: refused as any unknown field.
         return Err(diagnose(value, version));
@@ -371,10 +422,16 @@ fn run_config(value: &mut Value, version: u64) -> Result<Config, String> {
     let volumes = value
         .as_object_mut()
         .and_then(|object| object.remove("volumes"));
+    let disks = value
+        .as_object_mut()
+        .and_then(|object| object.remove("disks"));
     let mut config = Config::deserialize(&*value).map_err(|_| diagnose(value, version))?;
     check(&config)?;
     if let Some(volumes) = volumes {
         config.volumes = paths(&volumes, "volumes", MAX_VOLUMES)?;
+    }
+    if let Some(disks) = disks {
+        config.disks = state_disks(&disks)?;
     }
     Ok(config)
 }
@@ -445,34 +502,204 @@ fn paths(value: &Value, field: &str, max: usize) -> Result<Vec<Vec<u8>>, String>
     let mut paths: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         let what = |problem: &str| format!("config field `{field}` entry {index} {problem}");
-        let Some(text) = entry.as_str() else {
-            return Err(what("is not a string"));
-        };
-        if text.len() > MAX_KEEP_BYTES {
-            return Err(what(&format!("is longer than {MAX_KEEP_BYTES} bytes")));
-        }
-        if text.contains('\0') {
-            return Err(what("holds a NUL byte"));
-        }
-        let Some(relative) = text.strip_prefix('/') else {
-            return Err(what("is not an absolute path"));
-        };
-        if relative.is_empty() {
-            return Err(what("is the root"));
-        }
-        if relative
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-        {
-            return Err(what("is not a normalised path"));
-        }
-        let path = relative.as_bytes().to_vec();
+        let path = absolute_path(entry).map_err(|problem| what(&problem))?;
         if paths.contains(&path) {
             return Err(what("is given twice"));
         }
         paths.push(path);
     }
     Ok(paths)
+}
+
+/// One absolute, normalised path (no `.`, `..` or empty component, no
+/// trailing slash, not `/` itself) of at most [`MAX_KEEP_BYTES`] bytes,
+/// without its leading `/`; or what is wrong with it, without quoting it.
+fn absolute_path(entry: &Value) -> Result<Vec<u8>, String> {
+    let Some(text) = entry.as_str() else {
+        return Err("is not a string".into());
+    };
+    if text.len() > MAX_KEEP_BYTES {
+        return Err(format!("is longer than {MAX_KEEP_BYTES} bytes"));
+    }
+    if text.contains('\0') {
+        return Err("holds a NUL byte".into());
+    }
+    let Some(relative) = text.strip_prefix('/') else {
+        return Err("is not an absolute path".into());
+    };
+    if relative.is_empty() {
+        return Err("is the root".into());
+    }
+    normalised(relative)?;
+    Ok(relative.as_bytes().to_vec())
+}
+
+/// Whether `path` (no leading `/`) has only plain components.
+fn normalised(path: &str) -> Result<(), String> {
+    if path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("is not a normalised path".into());
+    }
+    Ok(())
+}
+
+/// The paths a state disk or a bind may not be at or below: the init's
+/// mounts `/proc`, `/sys` and `/dev` (as for volumes) and its tmpfs
+/// `/run`.
+fn reserved(path: &[u8]) -> bool {
+    crate::volumes::is_system(path)
+        || path.split(|&byte| byte == b'/').next() == Some(b"run".as_slice())
+}
+
+/// Whether `a` and `b` (no leading `/`) are the same path or one is
+/// below the other.
+fn overlaps(a: &[u8], b: &[u8]) -> bool {
+    let below = |inner: &[u8], outer: &[u8]| {
+        inner.len() > outer.len()
+            && inner.starts_with(outer)
+            && inner.get(outer.len()) == Some(&b'/')
+    };
+    a == b || below(a, b) || below(b, a)
+}
+
+/// Whether `serial` is 1 to [`MAX_SERIAL_BYTES`] letters, digits, `.`,
+/// `_` and `-`.
+fn valid_serial(serial: &str) -> bool {
+    (1..=MAX_SERIAL_BYTES).contains(&serial.len())
+        && serial
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+/// Checks that `object` holds `required` and nothing but `allowed`;
+/// `what` words the problem for the message.
+fn object_fields<'a>(
+    entry: &'a Value,
+    allowed: &[&str],
+    required: &[&str],
+    what: &dyn Fn(&str) -> String,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    let Some(object) = entry.as_object() else {
+        return Err(what("is not an object"));
+    };
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(what(&format!("has an unknown field `{}`", printable(key))));
+        }
+    }
+    for key in required {
+        if !object.contains_key(*key) {
+            return Err(what(&format!("lacks `{key}`")));
+        }
+    }
+    Ok(object)
+}
+
+/// Version 6's `disks`: 0 to [`MAX_DISKS`] state disks, each `serial`
+/// (none twice), `path` (absolute, normalised, not reserved) and 0 to
+/// [`MAX_BINDS`] `binds`, each `source` (a normalised path inside the
+/// disk) and `path` (as a disk's). No disk's or bind's path is at, inside
+/// or above another's: each mount covers a place of its own.
+fn state_disks(value: &Value) -> Result<Vec<Disk>, String> {
+    let Some(entries) = value.as_array() else {
+        return Err("config field `disks` is not a list".into());
+    };
+    if entries.len() > MAX_DISKS {
+        return Err(format!(
+            "config field `disks` holds more than {MAX_DISKS} disks"
+        ));
+    }
+    let mut disks: Vec<Disk> = Vec::with_capacity(entries.len());
+    // Every disk's and bind's path so far.
+    let mut taken: Vec<Vec<u8>> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let what = |problem: &str| format!("config field `disks` entry {index} {problem}");
+        let object = object_fields(
+            entry,
+            &["serial", "path", "binds"],
+            &["serial", "path"],
+            &what,
+        )?;
+        let serial = object
+            .get("serial")
+            .and_then(Value::as_str)
+            .filter(|serial| valid_serial(serial))
+            .ok_or_else(|| {
+                what(&format!(
+                    "`serial` is not 1 to {MAX_SERIAL_BYTES} letters, digits, `.`, `_` and `-`"
+                ))
+            })?;
+        if disks.iter().any(|disk| disk.serial == serial) {
+            return Err(what("`serial` is given twice"));
+        }
+        let path = mount_path(object.get("path"), &taken)
+            .map_err(|problem| what(&format!("`path` {problem}")))?;
+        taken.push(path.clone());
+        let binds = match object.get("binds") {
+            None => Vec::new(),
+            Some(binds) => {
+                let Some(binds) = binds.as_array() else {
+                    return Err(what("`binds` is not a list"));
+                };
+                if binds.len() > MAX_BINDS {
+                    return Err(what(&format!("`binds` holds more than {MAX_BINDS} binds")));
+                }
+                let mut checked = Vec::with_capacity(binds.len());
+                for (number, bind) in binds.iter().enumerate() {
+                    let what = |problem: &str| what(&format!("bind {number} {problem}"));
+                    let object =
+                        object_fields(bind, &["source", "path"], &["source", "path"], &what)?;
+                    let source = relative_path(object.get("source"))
+                        .map_err(|problem| what(&format!("`source` {problem}")))?;
+                    let path = mount_path(object.get("path"), &taken)
+                        .map_err(|problem| what(&format!("`path` {problem}")))?;
+                    taken.push(path.clone());
+                    checked.push(Bind { source, path });
+                }
+                checked
+            }
+        };
+        disks.push(Disk {
+            serial: serial.to_owned(),
+            path,
+            binds,
+        });
+    }
+    Ok(disks)
+}
+
+/// A state disk's or a bind's `path`: absolute and normalised, not in a
+/// [`reserved`] place, at, inside or above none of `taken`.
+fn mount_path(entry: Option<&Value>, taken: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let path = absolute_path(entry.unwrap_or(&Value::Null))?;
+    if reserved(&path) {
+        return Err("is in /proc, /sys, /dev or /run".into());
+    }
+    if taken.iter().any(|other| overlaps(other, &path)) {
+        return Err("is at, inside or above another disk's or bind's path".into());
+    }
+    Ok(path)
+}
+
+/// A bind's `source`: a normalised path relative to the disk's root, at
+/// most [`MAX_KEEP_BYTES`] bytes.
+fn relative_path(entry: Option<&Value>) -> Result<Vec<u8>, String> {
+    let Some(text) = entry.and_then(Value::as_str) else {
+        return Err("is not a string".into());
+    };
+    if text.len() > MAX_KEEP_BYTES {
+        return Err(format!("is longer than {MAX_KEEP_BYTES} bytes"));
+    }
+    if text.contains('\0') {
+        return Err("holds a NUL byte".into());
+    }
+    if text.starts_with('/') {
+        return Err("is not a relative path".into());
+    }
+    normalised(text)?;
+    Ok(text.as_bytes().to_vec())
 }
 
 fn layer(index: usize, entry: &Value) -> Result<Layer, String> {
@@ -1190,6 +1417,343 @@ mod tests {
             parse_boot(r#"{"version": 4, "argv": ["a"]}"#, 5).unwrap_err(),
             "the config's version is not the boot's interface version (gh.v)"
         );
+    }
+
+    /// A version-6 run config with `disks` set to the JSON `disks`.
+    fn disks(disks: &str) -> Result<Vec<Disk>, String> {
+        let text = format!(r#"{{"version": 6, "argv": ["a"], "disks": {disks}}}"#);
+        match parse_boot(&text, 6)? {
+            Boot::Run(config) => Ok(config.disks),
+            Boot::Unpack(_) => panic!("not the run mode"),
+        }
+    }
+
+    #[test]
+    fn version_six_disks() {
+        let Boot::Run(config) = parse_boot(r#"{"version": 6, "argv": ["a"]}"#, 6).unwrap() else {
+            panic!("not the run mode")
+        };
+        assert!(config.disks.is_empty());
+        assert!(disks("[]").unwrap().is_empty());
+        let parsed = disks(
+            r#"[{"serial": "state-0", "path": "/var/lib/state",
+                 "binds": [{"source": "etc/wireguard", "path": "/etc/wireguard"},
+                           {"source": "db", "path": "/srv/db"}]},
+                {"serial": "A.b_9-z", "path": "/data"}]"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].serial, "state-0");
+        assert_eq!(parsed[0].path, b"var/lib/state");
+        assert_eq!(parsed[0].binds.len(), 2);
+        assert_eq!(parsed[0].binds[0].source, b"etc/wireguard");
+        assert_eq!(parsed[0].binds[0].path, b"etc/wireguard");
+        assert_eq!(parsed[0].binds[1].source, b"db");
+        assert_eq!(parsed[1].serial, "A.b_9-z");
+        assert!(parsed[1].binds.is_empty());
+        // With the other fields of version 5.
+        let Boot::Run(config) = parse_boot(
+            r#"{"version": 6, "mode": "run", "argv": ["/sbin/init"], "init_system": true,
+                "volumes": ["/srv"], "disks": [{"serial": "s", "path": "/state", "binds": []}]}"#,
+            6,
+        )
+        .unwrap() else {
+            panic!("not the run mode")
+        };
+        assert!(config.init_system);
+        assert_eq!(config.volumes, [b"srv".to_vec()]);
+        assert_eq!(config.disks.len(), 1);
+    }
+
+    #[test]
+    fn disks_bounds() {
+        let disk = |n: usize| format!(r#"{{"serial": "s{n}", "path": "/d{n}"}}"#);
+        let eight: Vec<String> = (0..MAX_DISKS).map(disk).collect();
+        assert_eq!(disks(&format!("[{}]", eight.join(","))).unwrap().len(), 8);
+        let nine: Vec<String> = (0..=MAX_DISKS).map(disk).collect();
+        assert_eq!(
+            disks(&format!("[{}]", nine.join(","))).unwrap_err(),
+            "config field `disks` holds more than 8 disks"
+        );
+        let bind = |n: usize| format!(r#"{{"source": "b{n}", "path": "/p{n}"}}"#);
+        let sixteen: Vec<String> = (0..MAX_BINDS).map(bind).collect();
+        let text = format!(
+            r#"[{{"serial": "s", "path": "/d", "binds": [{}]}}]"#,
+            sixteen.join(",")
+        );
+        assert_eq!(disks(&text).unwrap()[0].binds.len(), 16);
+        let seventeen: Vec<String> = (0..=MAX_BINDS).map(bind).collect();
+        let text = format!(
+            r#"[{{"serial": "s", "path": "/d", "binds": [{}]}}]"#,
+            seventeen.join(",")
+        );
+        assert_eq!(
+            disks(&text).unwrap_err(),
+            "config field `disks` entry 0 `binds` holds more than 16 binds"
+        );
+        let longest = format!("/{}", "a".repeat(MAX_KEEP_BYTES - 1));
+        assert!(disks(&format!(r#"[{{"serial": "s", "path": "{longest}"}}]"#)).is_ok());
+        assert_eq!(
+            disks(&format!(
+                r#"[{{"serial": "s", "path": "/{}"}}]"#,
+                "a".repeat(MAX_KEEP_BYTES)
+            ))
+            .unwrap_err(),
+            "config field `disks` entry 0 `path` is longer than 4095 bytes"
+        );
+        let source = "a".repeat(MAX_KEEP_BYTES);
+        assert!(
+            disks(&format!(
+                r#"[{{"serial": "s", "path": "/d", "binds": [{{"source": "{source}", "path": "/p"}}]}}]"#
+            ))
+            .is_ok()
+        );
+        assert_eq!(
+            disks(&format!(
+                r#"[{{"serial": "s", "path": "/d", "binds": [{{"source": "{source}a", "path": "/p"}}]}}]"#
+            ))
+            .unwrap_err(),
+            "config field `disks` entry 0 bind 0 `source` is longer than 4095 bytes"
+        );
+        assert_eq!(
+            disks(r#"{"serial": "s"}"#).unwrap_err(),
+            "config field `disks` is not a list"
+        );
+    }
+
+    #[test]
+    fn disks_fields_checked() {
+        let one = |fields: &str| disks(&format!("[{{{fields}}}]"));
+        for (fields, error) in [
+            (r#""serial": "s""#, "entry 0 lacks `path`"),
+            (r#""path": "/d""#, "entry 0 lacks `serial`"),
+            (
+                r#""serial": "s", "path": "/d", "size": 1"#,
+                "entry 0 has an unknown field `size`",
+            ),
+            (
+                r#""serial": "s", "path": "/d", "binds": {}"#,
+                "entry 0 `binds` is not a list",
+            ),
+            (
+                r#""serial": "s", "path": "/d", "binds": [{"source": "a"}]"#,
+                "entry 0 bind 0 lacks `path`",
+            ),
+            (
+                r#""serial": "s", "path": "/d", "binds": [{"path": "/a"}]"#,
+                "entry 0 bind 0 lacks `source`",
+            ),
+            (
+                r#""serial": "s", "path": "/d", "binds": [{"source": "a", "path": "/a", "ro": true}]"#,
+                "entry 0 bind 0 has an unknown field `ro`",
+            ),
+            (
+                r#""serial": "s", "path": "/d", "binds": [5]"#,
+                "entry 0 bind 0 is not an object",
+            ),
+        ] {
+            assert_eq!(
+                one(fields).unwrap_err(),
+                format!("config field `disks` {error}"),
+                "{fields}"
+            );
+        }
+        assert_eq!(
+            disks("[5]").unwrap_err(),
+            "config field `disks` entry 0 is not an object"
+        );
+    }
+
+    #[test]
+    fn disks_serials_checked() {
+        let error = "config field `disks` entry 0 `serial` is not 1 to 20 letters, digits, `.`, `_` and `-`";
+        for serial in [
+            r#""""#,
+            r#""a b""#,
+            r#""a/b""#,
+            r#""ü""#,
+            r#""a\u0000""#,
+            r#""123456789012345678901""#,
+            "5",
+            "null",
+        ] {
+            assert_eq!(
+                disks(&format!(r#"[{{"serial": {serial}, "path": "/d"}}]"#)).unwrap_err(),
+                error,
+                "{serial}"
+            );
+        }
+        assert!(disks(r#"[{"serial": "12345678901234567890", "path": "/d"}]"#).is_ok());
+        assert_eq!(
+            disks(r#"[{"serial": "s", "path": "/a"}, {"serial": "s", "path": "/b"}]"#).unwrap_err(),
+            "config field `disks` entry 1 `serial` is given twice"
+        );
+    }
+
+    #[test]
+    fn disks_paths_checked() {
+        for (value, problem) in [
+            (r#""/""#, "is the root"),
+            (r#""data""#, "is not an absolute path"),
+            (r#""/data/""#, "is not a normalised path"),
+            (r#""/data/../etc""#, "is not a normalised path"),
+            (r#""/a\u0000b""#, "holds a NUL byte"),
+            ("1", "is not a string"),
+            (r#""/proc""#, "is in /proc, /sys, /dev or /run"),
+            (r#""/sys/fs/x""#, "is in /proc, /sys, /dev or /run"),
+            (r#""/dev/shm/x""#, "is in /proc, /sys, /dev or /run"),
+            (r#""/run""#, "is in /proc, /sys, /dev or /run"),
+            (r#""/run/state""#, "is in /proc, /sys, /dev or /run"),
+        ] {
+            assert_eq!(
+                disks(&format!(r#"[{{"serial": "s", "path": {value}}}]"#)).unwrap_err(),
+                format!("config field `disks` entry 0 `path` {problem}"),
+                "{value}"
+            );
+            assert_eq!(
+                disks(&format!(
+                    r#"[{{"serial": "s", "path": "/d", "binds": [{{"source": "a", "path": {value}}}]}}]"#
+                ))
+                .unwrap_err(),
+                format!("config field `disks` entry 0 bind 0 `path` {problem}"),
+                "{value}"
+            );
+        }
+        // Names that only start like the reserved ones are the image's.
+        assert!(disks(r#"[{"serial": "s", "path": "/runner/process/devices"}]"#).is_ok());
+        for (value, problem) in [
+            (r#""/abs""#, "is not a relative path"),
+            (r#""""#, "is not a normalised path"),
+            (r#""a/../b""#, "is not a normalised path"),
+            (r#""..""#, "is not a normalised path"),
+            (r#""a/""#, "is not a normalised path"),
+            (r#""./a""#, "is not a normalised path"),
+            (r#""a\u0000""#, "holds a NUL byte"),
+            ("[]", "is not a string"),
+        ] {
+            assert_eq!(
+                disks(&format!(
+                    r#"[{{"serial": "s", "path": "/d", "binds": [{{"source": {value}, "path": "/p"}}]}}]"#
+                ))
+                .unwrap_err(),
+                format!("config field `disks` entry 0 bind 0 `source` {problem}"),
+                "{value}"
+            );
+        }
+        // No path at, inside or above another disk's or bind's.
+        let overlap = "is at, inside or above another disk's or bind's path";
+        for (second_disk, error) in [
+            (r#""/state""#, format!("entry 1 `path` {overlap}")),
+            (r#""/state/inner""#, format!("entry 1 `path` {overlap}")),
+            (r#""/etc""#, format!("entry 1 `path` {overlap}")),
+            (r#""/etc/app/x""#, format!("entry 1 `path` {overlap}")),
+        ] {
+            let text = format!(
+                r#"[{{"serial": "a", "path": "/state", "binds": [{{"source": "x", "path": "/etc/app"}}]}},
+                    {{"serial": "b", "path": {second_disk}}}]"#
+            );
+            assert_eq!(
+                disks(&text).unwrap_err(),
+                format!("config field `disks` {error}"),
+                "{second_disk}"
+            );
+        }
+        for bind_path in [r#""/state""#, r#""/state/x""#, r#""/""#] {
+            let text = format!(
+                r#"[{{"serial": "a", "path": "/state", "binds": [{{"source": "x", "path": {bind_path}}}]}}]"#
+            );
+            assert!(disks(&text).is_err(), "{bind_path}");
+        }
+        assert_eq!(
+            disks(
+                r#"[{"serial": "a", "path": "/state", "binds": [{"source": "x", "path": "/etc/a"}, {"source": "y", "path": "/etc/a"}]}]"#
+            )
+            .unwrap_err(),
+            format!("config field `disks` entry 0 bind 1 `path` {overlap}")
+        );
+        // Siblings and names sharing a prefix are apart.
+        assert!(
+            disks(
+                r#"[{"serial": "a", "path": "/state", "binds": [{"source": "x", "path": "/statefile"}, {"source": "x", "path": "/etc/a"}, {"source": "y", "path": "/etc/ab"}]}]"#
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn disks_unknown_before_version_six() {
+        for version in 1..=5u32 {
+            let text = format!(
+                r#"{{"version": {version}, "argv": ["a"], "disks": [{{"serial": "s", "path": "/d"}}]}}"#
+            );
+            assert_eq!(
+                parse_boot(&text, version).unwrap_err(),
+                "the config has an unknown field `disks`",
+                "{version}"
+            );
+        }
+        let text = format!(
+            r#"{{"version": 6, "mode": "unpack", "disks": [], "layers": [{}]}}"#,
+            layer_json(TAR, DIGEST, "1")
+        );
+        assert_eq!(
+            parse_boot(&text, 6).unwrap_err(),
+            "config field `disks` is not taken in the unpack mode"
+        );
+        let text = format!(
+            r#"{{"version": 5, "mode": "unpack", "disks": [], "layers": [{}]}}"#,
+            layer_json(TAR, DIGEST, "1")
+        );
+        assert_eq!(
+            parse_boot(&text, 5).unwrap_err(),
+            "the config has an unknown field `disks`"
+        );
+        // Version 6's unpack mode is version 5's, keep included.
+        let text = format!(
+            r#"{{"version": 6, "mode": "unpack", "keep": ["/data"], "layers": [{}]}}"#,
+            layer_json(TAR, DIGEST, "1")
+        );
+        assert!(matches!(parse_boot(&text, 6), Ok(Boot::Unpack(_))));
+        assert_eq!(
+            parse_boot(r#"{"version": 6, "argv": ["a"]}"#, 5).unwrap_err(),
+            "the config's version is not one this init supports"
+        );
+        assert_eq!(
+            parse_boot(r#"{"version": 5, "argv": ["a"]}"#, 6).unwrap_err(),
+            "the config's version is not the boot's interface version (gh.v)"
+        );
+    }
+
+    #[test]
+    fn disks_never_shown() {
+        let config = disks(&format!(
+            r#"[{{"serial": "s", "path": "/{SECRET}", "binds": [{{"source": "{SECRET}", "path": "/x{SECRET}"}}]}}]"#
+        ))
+        .unwrap();
+        let shown = format!("{config:?}");
+        assert!(!shown.contains(SECRET), "{shown}");
+        let Boot::Run(full) = parse_boot(
+            &format!(r#"{{"version": 6, "argv": ["a"], "disks": [{{"serial": "{}", "path": "/{SECRET}"}}]}}"#, &SECRET[..6]),
+            6,
+        )
+        .unwrap() else {
+            panic!("not the run mode")
+        };
+        let shown = format!("{full:?}");
+        assert!(
+            !shown.contains(SECRET) && !shown.contains(&SECRET[..6]),
+            "{shown}"
+        );
+        for text in [
+            format!(r#"[{{"serial": "{SECRET}!", "path": "/d"}}]"#),
+            format!(r#"[{{"serial": "s", "path": "{SECRET}"}}]"#),
+            format!(
+                r#"[{{"serial": "s", "path": "/d", "binds": [{{"source": "/{SECRET}", "path": "/p"}}]}}]"#
+            ),
+        ] {
+            let error = disks(&text).unwrap_err();
+            assert!(!error.contains(SECRET), "{text}: {error}");
+        }
     }
 
     #[test]

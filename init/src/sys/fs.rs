@@ -1,5 +1,6 @@
 //! File system calls relative to directory descriptors, for the unpack
-//! mode, the copy of the image's `/run` and the volume directories: every
+//! mode, the copy of the image's `/run`, the volume directories and the
+//! state disks: every
 //! path resolved goes through `openat2` with `RESOLVE_IN_ROOT`, and every
 //! change is made with an `*at` call on the resolved parent and a single
 //! name.
@@ -20,6 +21,11 @@ pub const RESOLVE_INSIDE: u64 =
 /// crossing the mounts inside the directory (the running root's `/run`,
 /// `/dev`).
 pub const RESOLVE_IN_ROOT: u64 = libc::RESOLVE_IN_ROOT | libc::RESOLVE_NO_MAGICLINKS;
+
+/// `RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS`: as [`RESOLVE_IN_ROOT`], but
+/// a symbolic link anywhere on the path is refused (`ELOOP`), the last
+/// component's too unless `O_PATH | O_NOFOLLOW` opens the link itself.
+pub const RESOLVE_NO_LINKS: u64 = libc::RESOLVE_IN_ROOT | libc::RESOLVE_NO_SYMLINKS;
 
 /// `setxattrat(2)`, Linux 6.13, x86-64; not every libc release names it.
 const SYS_SETXATTRAT: libc::c_long = 463;
@@ -86,6 +92,12 @@ pub fn open_inside(dir: BorrowedFd<'_>, path: &CStr, flags: libc::c_int) -> io::
 /// `dir` as its root, mounts inside it crossed.
 pub fn open_in_root(dir: BorrowedFd<'_>, path: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
     openat2(dir, path, flags, RESOLVE_IN_ROOT)
+}
+
+/// `openat2(dir, path, flags, RESOLVE_NO_LINKS)`: `path` is resolved with
+/// `dir` as its root, through no symbolic link, mounts inside it crossed.
+pub fn open_no_links(dir: BorrowedFd<'_>, path: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
+    openat2(dir, path, flags, RESOLVE_NO_LINKS)
 }
 
 fn openat2(
@@ -221,6 +233,23 @@ pub fn link_at(
         )
     })
     .map(drop)
+}
+
+/// Renames `old_name` in `dir` to `new_name` in the same `dir`, failing
+/// when `new_name` exists (`RENAME_NOREPLACE`).
+pub fn rename_at(dir: BorrowedFd<'_>, old_name: &CStr, new_name: &CStr) -> io::Result<()> {
+    // SAFETY: both names are valid C strings; the call returns 0 or -1.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            dir.as_raw_fd(),
+            old_name.as_ptr(),
+            dir.as_raw_fd(),
+            new_name.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc < 0 { Err(errno()) } else { Ok(()) }
 }
 
 /// Removes `name` from `dir`: a directory (empty) with `directory`.

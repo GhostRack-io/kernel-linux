@@ -4,6 +4,8 @@
 use crate::protocol::Report;
 use crate::sys::{self, mount, vsock};
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -13,6 +15,10 @@ static PORT: AtomicU32 = AtomicU32::new(u32::MAX);
 /// Set once the renter's disk is the root, so the end remounts it
 /// read-only.
 static ON_DISK: AtomicBool = AtomicBool::new(false);
+
+/// The roots of version 6's mounted state disks, held open so the end
+/// remounts each read-only, as it does the root.
+static STATE_DISKS: Mutex<Vec<OwnedFd>> = Mutex::new(Vec::new());
 
 /// How long a report retries a host that does not answer.
 const REPORT_RETRY: Duration = Duration::from_secs(2);
@@ -38,6 +44,13 @@ pub fn set_port(port: u32) {
 
 pub fn set_on_disk() {
     ON_DISK.store(true, Ordering::SeqCst);
+}
+
+/// Keeps the root of a mounted state disk, for [`power_off`].
+pub fn add_state_disk(root: OwnedFd) {
+    if let Ok(mut disks) = STATE_DISKS.lock() {
+        disks.push(root);
+    }
 }
 
 /// Sends a report: on the console, then over vsock to the host.
@@ -90,9 +103,20 @@ pub fn fail(message: &str) -> ! {
     power_off()
 }
 
-/// Flushes the disk, remounts it read-only and powers the machine off.
+/// Flushes the disks, remounts the state disks and the root read-only and
+/// powers the machine off.
 pub fn power_off() -> ! {
     sys::sync();
+    if let Ok(disks) = STATE_DISKS.lock() {
+        for (index, root) in disks.iter().enumerate() {
+            let path = format!("/proc/self/fd/{}", root.as_raw_fd());
+            if let Err(error) = mount::remount_readonly(&path) {
+                log(&format!(
+                    "remounting state disk {index} read-only failed: {error}"
+                ));
+            }
+        }
+    }
     if ON_DISK.load(Ordering::SeqCst)
         && let Err(error) = mount::remount_root_readonly()
     {

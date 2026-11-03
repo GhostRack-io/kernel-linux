@@ -11,6 +11,7 @@
 mod cmdline;
 mod config;
 mod console;
+mod disks;
 mod etc;
 mod grow;
 mod protocol;
@@ -41,7 +42,7 @@ mod tests {
     /// build-info.json.
     #[test]
     fn one_interface_version() {
-        assert_eq!(crate::cmdline::VERSIONS, &[1, 2, 3, 4, 5]);
+        assert_eq!(crate::cmdline::VERSIONS, &[1, 2, 3, 4, 5, 6]);
         let config: Vec<u32> = crate::config::VERSIONS
             .iter()
             .map(|&v| u32::try_from(v).unwrap())

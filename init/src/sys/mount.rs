@@ -10,6 +10,7 @@ use std::ptr;
 pub const NOSUID: c_ulong = libc::MS_NOSUID;
 pub const NODEV: c_ulong = libc::MS_NODEV;
 pub const NOEXEC: c_ulong = libc::MS_NOEXEC;
+pub const NOATIME: c_ulong = libc::MS_NOATIME;
 pub const RDONLY: c_ulong = libc::MS_RDONLY;
 pub const REMOUNT: c_ulong = libc::MS_REMOUNT;
 
@@ -95,6 +96,11 @@ pub fn bind_over(source: &str, target: &str) -> io::Result<()> {
 /// Remounts the root read-only, so a power-off loses nothing.
 pub fn remount_root_readonly() -> io::Result<()> {
     mount(None, "/", None, libc::MS_REMOUNT | libc::MS_RDONLY, None)
+}
+
+/// Remounts the mount whose root `target` is read-only.
+pub fn remount_readonly(target: &str) -> io::Result<()> {
+    mount(None, target, None, libc::MS_REMOUNT | libc::MS_RDONLY, None)
 }
 
 /// Unmounts `target`.

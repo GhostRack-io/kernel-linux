@@ -67,12 +67,13 @@ r dev_kvm_absent sh -c '! test -e /dev/kvm'
 r tun sh -c 'test -c /dev/net/tun || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200; }; ip tuntap add dev tun0 mode tun && ip link del tun0'
 r veth_bridge sh -c 'ip link add v0 type veth peer name v1 && ip link add br0 type bridge && ip link set v0 master br0 && ip link del br0 && ip link del v0'
 # A router's traffic shaping: the fair queue, ifb, and the fw, u32 and
-# flower classifiers with the skbedit and mirred actions, on a dummy link.
+# flower classifiers with the skbedit and mirred actions, on a dummy link
+# (ifb0 and ifb1 are the kernel's own, made at boot).
 r tc_sfq sh -c 'ip link add d0 type dummy && tc qdisc add dev d0 root sfq perturb 10 && tc qdisc show dev d0 | grep -q sfq && ip link del d0'
-r ifb sh -c 'ip link add ifb0 type ifb && ip link set ifb0 up && ip link del ifb0'
+r ifb sh -c 'ip link add ifb9 type ifb && ip link set ifb9 up && ip link del ifb9'
 r tc_fw_skbedit sh -c 'ip link add d0 type dummy && tc qdisc add dev d0 root handle 1: htb && tc class add dev d0 parent 1: classid 1:1 htb rate 10mbit && tc filter add dev d0 parent 1: protocol ip prio 1 handle 7 fw flowid 1:1 action skbedit priority 1:1 && tc filter show dev d0 | grep -q skbedit && ip link del d0'
-r tc_u32_mirred sh -c 'ip link add d0 type dummy && ip link add ifb0 type ifb && tc qdisc add dev d0 ingress && tc filter add dev d0 parent ffff: protocol ip prio 1 u32 match ip dst 10.0.0.0/8 action mirred egress redirect dev ifb0 && tc filter show dev d0 parent ffff: | grep -q mirred && ip link del d0 && ip link del ifb0'
-r tc_flower_mirred sh -c 'ip link add d0 type dummy && ip link add ifb0 type ifb && tc qdisc add dev d0 clsact && tc filter add dev d0 ingress protocol ip flower dst_ip 10.0.0.1 action skbedit mark 5 pipe action mirred egress redirect dev ifb0 && tc filter show dev d0 ingress | grep -q flower && ip link del d0 && ip link del ifb0'
+r tc_u32_mirred sh -c 'ip link add d0 type dummy && ip link add ifb9 type ifb && tc qdisc add dev d0 ingress && tc filter add dev d0 parent ffff: protocol ip prio 1 u32 match ip dst 10.0.0.0/8 action mirred egress redirect dev ifb9 && tc filter show dev d0 parent ffff: | grep -q mirred && ip link del d0 && ip link del ifb9'
+r tc_flower_mirred sh -c 'ip link add d0 type dummy && ip link add ifb9 type ifb && tc qdisc add dev d0 clsact && tc filter add dev d0 ingress protocol ip flower dst_ip 10.0.0.1 action skbedit mark 5 pipe action mirred egress redirect dev ifb9 && tc filter show dev d0 ingress | grep -q flower && ip link del d0 && ip link del ifb9'
 # The machine's own namespace has the fallback tunnel tunl0, a namespace
 # made later none (net.core.fb_tunnels_only_for_init_net).
 r tunl0_only_in_the_machine sh -c 'ip link show tunl0 > /dev/null && grep -q -x 1 /proc/sys/net/core/fb_tunnels_only_for_init_net && unshare -n sh -c "! ip link show tunl0 2> /dev/null && ip link show lo > /dev/null"'

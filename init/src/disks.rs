@@ -29,9 +29,10 @@ const WAIT: Duration = Duration::from_secs(5);
 /// The root disk's name in `/sys/block`: no state disk may be it.
 const ROOT: &str = "vda";
 
-/// The name a bind's source is first filled under, then renamed from, so
-/// a copy cut short (a power cut) is never taken for a filled source: it
-/// is removed and made again at the next boot.
+/// The name a bind's source is first filled under, then renamed from once
+/// the copy is on the disk, so a copy cut short (a power cut) is never
+/// taken for a filled source: it is removed and made again at the next
+/// boot.
 const FILLING: &CStr = c".gigahost-init-filling";
 
 /// How much of the image's directory a bind's first fill copies at most:
@@ -272,17 +273,23 @@ fn source(
             fs::chmod_at(parent.as_fd(), &last, 0o755).map_err(|error| wrong(&error))?;
             Ok(None)
         }
-        Image::Directory(image) => fill(parent.as_fd(), &last, image.as_fd()).map(Some),
+        Image::Directory(image) => {
+            fill(parent.as_fd(), &last, image.as_fd(), &mut fs::sync_fs).map(Some)
+        }
     }
 }
 
 /// Fills a new `name` in `parent` with a copy of the image's directory
-/// `image`: copied under [`FILLING`], then renamed to `name`, so a copy
-/// that did not finish is never `name`.
+/// `image`: copied under [`FILLING`], written to the disk with `sync` (the
+/// disk's `syncfs`: ext4 writes file data back well after the names), then
+/// renamed to `name` and synced again, so a copy that did not finish or is
+/// not yet on the disk is never `name`, and the rename is on the disk
+/// before anything of the image runs.
 fn fill(
     parent: BorrowedFd<'_>,
     name: &CStr,
     image: BorrowedFd<'_>,
+    sync: &mut dyn FnMut(BorrowedFd<'_>) -> io::Result<()>,
 ) -> Result<seed::Outcome, String> {
     let failed = |what: &str, error: &dyn std::fmt::Display| format!(": {what} failed: {error}");
     apply::remove_below(parent, FILLING, 0)
@@ -305,7 +312,9 @@ fn fill(
             stop.describe(&FILL_BOUNDS)
         ));
     }
+    sync(target.as_fd()).map_err(|error| failed("writing the copy to the disk", &error))?;
     fs::rename_at(parent, FILLING, name).map_err(|error| failed("renaming the copy", &error))?;
+    sync(parent).map_err(|error| failed("writing the rename to the disk", &error))?;
     Ok(outcome)
 }
 
@@ -444,6 +453,41 @@ mod tests {
             "f"
         );
         assert!(!scratch.disk().join("app/half").exists());
+    }
+
+    #[test]
+    fn the_copy_is_on_the_disk_before_its_rename_and_the_rename_after() {
+        let scratch = Scratch::new();
+        stdfs::create_dir_all(scratch.root().join("etc/app")).unwrap();
+        stdfs::write(scratch.root().join("etc/app/f"), "f").unwrap();
+        let disk = Scratch::open(&scratch.disk());
+        let image = Scratch::open(&scratch.root().join("etc/app"));
+        let copy = scratch.disk().join(".gigahost-init-filling/f");
+        let made = scratch.disk().join("app");
+        // At each sync: is the copy's file there, and is the source?
+        let mut seen = Vec::new();
+        let mut sync = |fd: BorrowedFd<'_>| {
+            seen.push((copy.is_file(), made.exists()));
+            fs::sync_fs(fd)
+        };
+        fill(disk.as_fd(), c"app", image.as_fd(), &mut sync).unwrap();
+        assert_eq!(seen, [(true, false), (false, true)]);
+        assert_eq!(stdfs::read_to_string(made.join("f")).unwrap(), "f");
+    }
+
+    #[test]
+    fn a_copy_that_does_not_reach_the_disk_is_not_the_source() {
+        let scratch = Scratch::new();
+        stdfs::create_dir_all(scratch.root().join("etc/app")).unwrap();
+        stdfs::write(scratch.root().join("etc/app/f"), "f").unwrap();
+        let disk = Scratch::open(&scratch.disk());
+        let image = Scratch::open(&scratch.root().join("etc/app"));
+        let mut sync = |_: BorrowedFd<'_>| Err(io::Error::from_raw_os_error(libc::EIO));
+        assert_eq!(
+            fill(disk.as_fd(), c"app", image.as_fd(), &mut sync).unwrap_err(),
+            ": writing the copy to the disk failed: Input/output error (os error 5)"
+        );
+        assert!(!scratch.disk().join("app").exists());
     }
 
     #[test]

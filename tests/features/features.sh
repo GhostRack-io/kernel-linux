@@ -71,6 +71,7 @@ r veth_bridge sh -c 'ip link add v0 type veth peer name v1 && ip link add br0 ty
 # (ifb0 and ifb1 are the kernel's own, made at boot).
 r tc_sfq sh -c 'ip link add d0 type dummy && tc qdisc add dev d0 root sfq perturb 10 && tc qdisc show dev d0 | grep -q sfq && ip link del d0'
 r ifb sh -c 'ip link add ifb9 type ifb && ip link set ifb9 up && ip link del ifb9'
+r ifb_made_at_boot sh -c 'ip link show ifb0 | grep -q "state DOWN" && ip link show ifb1 | grep -q "state DOWN" && ! ip link show ifb2 2> /dev/null'
 r tc_fw_skbedit sh -c 'ip link add d0 type dummy && tc qdisc add dev d0 root handle 1: htb && tc class add dev d0 parent 1: classid 1:1 htb rate 10mbit && tc filter add dev d0 parent 1: protocol ip prio 1 handle 7 fw flowid 1:1 action skbedit priority 1:1 && tc filter show dev d0 | grep -q skbedit && ip link del d0'
 r tc_u32_mirred sh -c 'ip link add d0 type dummy && ip link add ifb9 type ifb && tc qdisc add dev d0 ingress && tc filter add dev d0 parent ffff: protocol ip prio 1 u32 match ip dst 10.0.0.0/8 action mirred egress redirect dev ifb9 && tc filter show dev d0 parent ffff: | grep -q mirred && ip link del d0 && ip link del ifb9'
 r tc_flower_mirred sh -c 'ip link add d0 type dummy && ip link add ifb9 type ifb && tc qdisc add dev d0 clsact && tc filter add dev d0 ingress protocol ip flower dst_ip 10.0.0.1 action skbedit mark 5 pipe action mirred egress redirect dev ifb9 && tc filter show dev d0 ingress | grep -q flower && ip link del d0 && ip link del ifb9'

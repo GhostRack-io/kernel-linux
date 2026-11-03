@@ -252,6 +252,13 @@ pub fn rename_at(dir: BorrowedFd<'_>, old_name: &CStr, new_name: &CStr) -> io::R
     if rc < 0 { Err(errno()) } else { Ok(()) }
 }
 
+/// `syncfs(fd)`: writes the dirty data and metadata of the file system
+/// `fd` is on to its disk, failing on a write-back error.
+pub fn sync_fs(fd: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: syncfs on an open descriptor.
+    check(unsafe { libc::syncfs(fd.as_raw_fd()) }).map(drop)
+}
+
 /// Removes `name` from `dir`: a directory (empty) with `directory`.
 pub fn unlink_at(dir: BorrowedFd<'_>, name: &CStr, directory: bool) -> io::Result<()> {
     let flags = if directory { libc::AT_REMOVEDIR } else { 0 };

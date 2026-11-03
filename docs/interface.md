@@ -57,11 +57,13 @@ mode's process is PID 1 of PID, mount and cgroup namespaces of its own
 (step 8 below), as Docker runs every container's entrypoint (an image
 such as s6-overlay's refuses to run as any other PID).
 
-In every version, since release 6.18.57-gh8, the init sets
+In every version, since release 6.18.57-gh9, the init sets
 `net.core.fb_tunnels_only_for_init_net` to 1 at boot (step 1 below): the
 machine's own network namespace keeps its fallback tunnel devices
 (`tunl0`, ...), a network namespace made later gets none, as
-distributions configure it.
+distributions configure it. Since that release the kernel also makes
+the machine's `ifb0` and `ifb1` at boot (IFB devices, for shaping a
+link's ingress), down and unconfigured.
 
 ## The machine
 
@@ -226,7 +228,7 @@ These are the run mode's steps; the unpack mode's follow.
    `/dev/console` for its own output, logs `ghostrack-init: start <ms>`
    (milliseconds of the guest's monotonic clock), mounts proc and sysfs,
    and sets `net.core.fb_tunnels_only_for_init_net` to 1 (since release
-   6.18.57-gh8; a failure is logged and the boot goes on).
+   6.18.57-gh9; a failure is logged and the boot goes on).
 2. Parses the kernel command line and reads the config; refuses an
    unknown interface or config version, and a config whose version is not
    the boot's (`gh.v`). An unpack config goes on with the unpack mode
@@ -298,8 +300,8 @@ These are the run mode's steps; the unpack mode's follow.
      modification time, `source` itself taking those of the image's
      `path` (FIFOs, sockets and devices are not copied); the copy is
      made under `.gigahost-init-filling` in the directory `source` is in
-     and renamed to `source` once whole, so a copy cut short is made
-     again at the next boot. It logs `gigahost-init: state disk N bind M: copied <n>
+     and renamed to `source` once whole and on the disk, so a copy cut
+     short is made again at the next boot. It logs `gigahost-init: state disk N bind M: copied <n>
      entries of the image's path`. A `source` that exists is never filled
      again: what the image has at `path` from then on is covered.
 

@@ -912,9 +912,9 @@ expect_line console.txt NO_MINE
 expect_line console.txt HAS_WORLD
 state_kib=$(grep -a -m 1 '^STATE_KIB=[0-9]*$' "${case_dir}/console.txt" | sed 's/^STATE_KIB=//' || true)
 (( ${state_kib:-0} > 100000 )) || fail "the grown state disk has ${state_kib:-0} KiB, expected more than 100000"
-grep -a -q -E "^gigahost-init: grew state disk 0's file system from [0-9]+ to [0-9]+ blocks" "${case_dir}/serial.log" \
+grep -a -q -E "^ghostrack-init: grew state disk 0's file system from [0-9]+ to [0-9]+ blocks" "${case_dir}/serial.log" \
     || fail "no line saying the state disk grew"
-grep -a -q -E "^gigahost-init: state disk 0 bind 0: copied [1-9][0-9]* entries of the image's path" "${case_dir}/serial.log" \
+grep -a -q -E "^ghostrack-init: state disk 0 bind 0: copied [1-9][0-9]* entries of the image's path" "${case_dir}/serial.log" \
     || fail "no line saying the bind's source was filled"
 expect_report '{"v":6,"event":"exited","code":0,"signal":null,"reason":"exited"}'
 [[ $(debugfs -R 'cat /app/mine' "${case_dir}/state.img" 2> /dev/null) == persisted ]] \

@@ -291,7 +291,7 @@ These are the run mode's steps; the unpack mode's follow.
      `noatime`. The init never makes a file system: the host makes the
      disk ext4 before its first boot. When the disk is larger than its
      file system, the init grows it as the root's (step 3), logging
-     `gigahost-init: grew state disk N's file system from <old> to <new>
+     `ghostrack-init: grew state disk N's file system from <old> to <new>
      blocks`;
    - for each bind in order: makes `source` in the disk when it is
      missing, then bind-mounts it over `path` (made a directory, owned by
@@ -301,9 +301,9 @@ These are the run mode's steps; the unpack mode's follow.
      regular files and symbolic links with their owner, group, mode and
      modification time, `source` itself taking those of the image's
      `path` (FIFOs, sockets and devices are not copied); the copy is
-     made under `.gigahost-init-filling` in the directory `source` is in
+     made under `.ghostrack-init-filling` in the directory `source` is in
      and renamed to `source` once whole and on the disk, so a copy cut
-     short is made again at the next boot. It logs `gigahost-init: state disk N bind M: copied <n>
+     short is made again at the next boot. It logs `ghostrack-init: state disk N bind M: copied <n>
      entries of the image's path`. A `source` that exists is never filled
      again: what the image has at `path` from then on is covered.
 

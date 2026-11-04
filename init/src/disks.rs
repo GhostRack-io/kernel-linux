@@ -33,7 +33,7 @@ const ROOT: &str = "vda";
 /// the copy is on the disk, so a copy cut short (a power cut) is never
 /// taken for a filled source: it is removed and made again at the next
 /// boot.
-const FILLING: &CStr = c".gigahost-init-filling";
+const FILLING: &CStr = c".ghostrack-init-filling";
 
 /// How much of the image's directory a bind's first fill copies at most:
 /// as Docker copies a new volume's contents, whole; the bounds keep the
@@ -334,7 +334,7 @@ mod tests {
         fn new() -> Self {
             static NEXT: AtomicU32 = AtomicU32::new(0);
             let dir = std::env::temp_dir().join(format!(
-                "gigahost-init-disks-{}-{}",
+                "ghostrack-init-disks-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::SeqCst)
             ));
@@ -405,7 +405,7 @@ mod tests {
             !scratch
                 .disk()
                 .join("state")
-                .join(".gigahost-init-filling")
+                .join(".ghostrack-init-filling")
                 .exists()
         );
     }
@@ -443,7 +443,7 @@ mod tests {
         let scratch = Scratch::new();
         stdfs::create_dir_all(scratch.root().join("etc/app")).unwrap();
         stdfs::write(scratch.root().join("etc/app/f"), "f").unwrap();
-        let left = scratch.disk().join(".gigahost-init-filling");
+        let left = scratch.disk().join(".ghostrack-init-filling");
         stdfs::create_dir_all(left.join("half/deep")).unwrap();
         stdfs::write(left.join("half/deep/old"), "old").unwrap();
         scratch.source("app", "etc/app").unwrap();
@@ -462,7 +462,7 @@ mod tests {
         stdfs::write(scratch.root().join("etc/app/f"), "f").unwrap();
         let disk = Scratch::open(&scratch.disk());
         let image = Scratch::open(&scratch.root().join("etc/app"));
-        let copy = scratch.disk().join(".gigahost-init-filling/f");
+        let copy = scratch.disk().join(".ghostrack-init-filling/f");
         let made = scratch.disk().join("app");
         // At each sync: is the copy's file there, and is the source?
         let mut seen = Vec::new();

@@ -500,7 +500,7 @@ before=${failures}
 boot features '{"version":1,"argv":["/bin/sh","/usr/local/bin/features.sh"]}'
 expect_started
 passed=$(grep -a -c '^FEATURE [a-z0-9_]* PASS' "${case_dir}/hvc.log" || true)
-[[ ${passed} == 28 ]] || fail "expected 28 passing feature checks, got ${passed}"
+[[ ${passed} == 29 ]] || fail "expected 29 passing feature checks, got ${passed}"
 expect_absent hvc.log ' FAIL '
 expect_report '"code":0,"signal":null,"reason":"exited"'
 show_logs "${before}"

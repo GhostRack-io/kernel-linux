@@ -78,6 +78,9 @@ r tc_flower_mirred sh -c 'ip link add d0 type dummy && ip link add ifb9 type ifb
 # The host guest bridge's ingress drop (item 235a): a match-all filter
 # with a drop action at a clsact ingress, as the agent installs it.
 r tc_matchall_drop sh -c 'ip link add d0 type dummy && tc qdisc replace dev d0 clsact && tc filter add dev d0 ingress pref 1 handle 1 protocol all matchall action drop && tc -json filter show dev d0 ingress | grep -q gact && ip link del d0'
+# No MPTCP (item 253): no /proc/sys/net/mptcp, and an MPTCP socket is
+# refused with EPROTONOSUPPORT, which Go's listeners fall back on.
+r no_mptcp sh -c '! test -e /proc/sys/net/mptcp && /usr/local/bin/mptcp-test'
 # The machine's own namespace has the fallback tunnel tunl0, a namespace
 # made later none (net.core.fb_tunnels_only_for_init_net).
 r tunl0_only_in_the_machine sh -c 'ip link show tunl0 > /dev/null && grep -q -x 1 /proc/sys/net/core/fb_tunnels_only_for_init_net && unshare -n sh -c "! ip link show tunl0 2> /dev/null && ip link show lo > /dev/null"'

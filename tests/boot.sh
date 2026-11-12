@@ -44,7 +44,7 @@ trap cleanup EXIT
 # The feature image, tagged by its inputs, exported as an OCI layout: its
 # layer blobs and their media types, as an agent downloads them.
 features=${repo}/tests/features
-tag=$(cat "${features}/Containerfile" "${features}/features.sh" "${features}/seccomp-test.c" | sha256sum | cut -c1-64)
+tag=$(cat "${features}/Containerfile" "${features}/features.sh" "${features}/seccomp-test.c" "${features}/mptcp-test.c" | sha256sum | cut -c1-64)
 image=localhost/kernel-linux-features:${tag}
 if ! podman image exists "${image}"; then
     echo "boot.sh: building ${image}"
@@ -500,7 +500,7 @@ before=${failures}
 boot features '{"version":1,"argv":["/bin/sh","/usr/local/bin/features.sh"]}'
 expect_started
 passed=$(grep -a -c '^FEATURE [a-z0-9_]* PASS' "${case_dir}/hvc.log" || true)
-[[ ${passed} == 29 ]] || fail "expected 29 passing feature checks, got ${passed}"
+[[ ${passed} == 30 ]] || fail "expected 30 passing feature checks, got ${passed}"
 expect_absent hvc.log ' FAIL '
 expect_report '"code":0,"signal":null,"reason":"exited"'
 show_logs "${before}"

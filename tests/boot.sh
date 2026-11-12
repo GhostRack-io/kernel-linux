@@ -750,14 +750,14 @@ show_logs "${before}"
 nofile_config() {
     cat << JSON
 {"version":1,"user":"$1",
- "argv":["/bin/sh","-c","id -u; grep \"Max open files\" /proc/self/limits; ulimit -S -n 65536 && ulimit -S -n; grep \"Max open files\" /proc/self/limits"]}
+ "argv":["/bin/sh","-c","echo uid=\$(id -u); grep \"Max open files\" /proc/self/limits; ulimit -S -n 65536 && ulimit -S -n; grep \"Max open files\" /proc/self/limits"]}
 JSON
 }
 for who in root nobody; do
     before=${failures}
     boot "nofile-${who}" "$(nofile_config "${who}")"
     expect_started
-    if [[ ${who} == root ]]; then expect_line hvc.log 0; else expect_line hvc.log 65534; fi
+    if [[ ${who} == root ]]; then expect_line hvc.log uid=0; else expect_line hvc.log uid=65534; fi
     grep -a -q -E '^Max open files +1024 +524288 +files' "${case_dir}/hvc.log" \
         || fail "the open-file limits are not 1024/524288"
     expect_line hvc.log 65536

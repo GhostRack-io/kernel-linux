@@ -44,6 +44,10 @@ const INIT_SYSTEM_ENV: &[&str] = &["container=ghostrack", "container_ttys="];
 pub fn run() -> ! {
     early();
     log(&format!("start {}", sys::monotonic_ms()));
+    if let Err(error) = process::set_open_files(process::OPEN_FILES_SOFT, process::OPEN_FILES_HARD)
+    {
+        log(&format!("setting the open-file limit failed: {error}"));
+    }
     no_fallback_tunnels();
     let cmdline = fs::read_to_string("/proc/cmdline")
         .unwrap_or_else(|error| fail(&format!("reading /proc/cmdline failed: {error}")));

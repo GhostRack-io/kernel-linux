@@ -741,6 +741,28 @@ expect_absent hvc.log 'Broken pipe'
 expect_report '"code":0,"signal":null,"reason":"exited"'
 show_logs "${before}"
 
+# 8a. The open-file limits are 1024 soft and 524288 hard, as under Docker
+# and systemd, for root and for a user the process drops to (HAProxy's
+# case: it raises the soft limit after the drop): the soft limit can be
+# raised up to the hard one without privilege.
+nofile_config() {
+    cat << JSON
+{"version":1,"user":"$1",
+ "argv":["/bin/sh","-c","id -u; grep \"Max open files\" /proc/self/limits; ulimit -n 65536 && ulimit -n"]}
+JSON
+}
+for who in root nobody; do
+    before=${failures}
+    boot "nofile-${who}" "$(nofile_config "${who}")"
+    expect_started
+    if [[ ${who} == root ]]; then expect_line hvc.log 0; else expect_line hvc.log 65534; fi
+    grep -a -q -E '^Max open files +1024 +524288 +files' "${case_dir}/hvc.log" \
+        || fail "the open-file limits are not 1024/524288"
+    expect_line hvc.log 65536
+    expect_report '"code":0,"signal":null,"reason":"exited"'
+    show_logs "${before}"
+done
+
 # 9. A kernel panic ends the machine at once (the panic resets it,
 # -no-reboot ends QEMU on a reset), without an exited report. A reboot or
 # a power-off by the process ends only its PID namespace: the kernel kills
@@ -1048,13 +1070,13 @@ init_system_cases() {
 
 # systemd stops on SIGRTMIN+3 (37 with glibc), busybox init powers off on
 # SIGUSR2 (12).
-init_system_cases systemd Containerfile.debian 37 12
+init_system_cases systemd Containerfile.debian 37 13
 
 # 15. systemd on version 6, as a router runs: two NICs and a state disk.
 # The disk is mounted at /srv/state and its lib bound over
 # /var/lib/init-features before systemd starts; the boot's unit writes
 # there (so the bind is its), eth1 is there and unconfigured; the three
-# checks of it pass with the twelve.
+# checks of it pass with the thirteen.
 before=${failures}
 new_case systemd-state '{"version":6,"argv":["/sbin/init"],"init_system":true,"stop_signal":37,"disks":[{"serial":"sd-state","path":"/srv/state","binds":[{"source":"lib","path":"/var/lib/init-features"}]}]}'
 cp --sparse=always "${work}/systemd.img" "${case_dir}/disk.img"
@@ -1065,7 +1087,7 @@ qemu "${v6_cmdline/gh.hostname=case-host/gh.hostname=state-host}" "${init_system
 qemu_extra=()
 tr -d '\r' < "${case_dir}/hvc.log" > "${case_dir}/console.txt"
 expect_started 6
-expect_init_features 15
+expect_init_features 16
 expect_line console.txt 'INFO action poweroff'
 expect_report '{"v":6,"event":"exited","code":null,"signal":2,"reason":"poweroff"}'
 [[ $(debugfs -R 'cat /lib/from-a-unit' "${case_dir}/state.img" 2> /dev/null) == from-a-unit ]] \
@@ -1073,7 +1095,7 @@ expect_report '{"v":6,"event":"exited","code":null,"signal":2,"reason":"poweroff
 rm -f "${case_dir}/disk.img" "${case_dir}/state.img" "${work}/systemd.img"
 show_logs "${before}"
 
-init_system_cases openrc Containerfile.alpine 12 11
+init_system_cases openrc Containerfile.alpine 12 12
 rm -f "${work}/openrc.img"
 
 if [[ ${failures} != 0 ]]; then

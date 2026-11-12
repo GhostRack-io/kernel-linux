@@ -358,6 +358,10 @@ These are the run mode's steps; the unpack mode's follow.
      does not handle its stop signal ends by the stop's SIGKILL after
      the timeout, as under `docker stop`;
    - every signal at its default action and none blocked;
+   - open files: 1024 soft, 524288 hard (`RLIMIT_NOFILE`), as Docker and
+     systemd give; a process may raise its soft limit up to the hard
+     one. Since release 6.18.57-gh12; before it the kernel's 1024 and
+     4096. The image's init system inherits it;
    - stdin is `/dev/null`; stdout and stderr go to `/dev/hvc0` in raw mode
      (byte for byte, no `\r` added), or to the serial console without hvc0.
      Since release 6.18.57-gh7, the selected output device is root-owned

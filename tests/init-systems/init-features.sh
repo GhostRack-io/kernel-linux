@@ -92,6 +92,8 @@ echo "INFO own_cgroup $(cat /proc/self/cgroup)"
 check cgroup_root cgroup_root
 check cgroup_mount cgroup_mount
 check cgroup_writable sh -c 'mkdir /sys/fs/cgroup/init-features && rmdir /sys/fs/cgroup/init-features'
+# The image's init system starts with the open-file limits the init sets.
+check open_files_hard test "$(ulimit -Hn)" -ge 524288
 check sys_readonly sh -c 'grep " /sys sysfs " /proc/mounts | grep -q "[ ,]ro[ ,]"'
 check no_kernel_threads_of_the_machine sh -c '! grep -q -x -s kthreadd /proc/*/comm'
 check address4 sh -c 'ip -4 addr show eth0 | grep -q "inet 10.115.0.15/24"'

@@ -514,6 +514,22 @@ pub fn reap(pid: i32) {
     }
 }
 
+/// The open-file limits every process of the machine starts with: the
+/// soft 1024 and hard 524288 that Docker 25 and a VM's systemd give.
+pub const OPEN_FILES_SOFT: u64 = 1024;
+pub const OPEN_FILES_HARD: u64 = 524_288;
+
+/// Sets this process's `RLIMIT_NOFILE`, which every process it starts
+/// inherits.
+pub fn set_open_files(soft: u64, hard: u64) -> io::Result<()> {
+    let limit = libc::rlimit {
+        rlim_cur: soft as libc::rlim_t,
+        rlim_max: hard as libc::rlim_t,
+    };
+    // SAFETY: the pointer is to a live rlimit.
+    check(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) }).map(|_| ())
+}
+
 /// Sends `signal` to `pid`.
 pub fn kill(pid: i32, signal: libc::c_int) {
     // SAFETY: kill has no memory preconditions.

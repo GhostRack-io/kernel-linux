@@ -744,11 +744,13 @@ show_logs "${before}"
 # 8a. The open-file limits are 1024 soft and 524288 hard, as under Docker
 # and systemd, for root and for a user the process drops to (HAProxy's
 # case: it raises the soft limit after the drop): the soft limit can be
-# raised up to the hard one without privilege.
+# raised up to the hard one without privilege, and the raise leaves the
+# hard limit as it was. (The shell's -S raises only the soft limit:
+# busybox's `ulimit -n` alone sets both, and would lower the hard one.)
 nofile_config() {
     cat << JSON
 {"version":1,"user":"$1",
- "argv":["/bin/sh","-c","id -u; grep \"Max open files\" /proc/self/limits; ulimit -n 65536 && ulimit -n"]}
+ "argv":["/bin/sh","-c","id -u; grep \"Max open files\" /proc/self/limits; ulimit -S -n 65536 && ulimit -S -n; grep \"Max open files\" /proc/self/limits"]}
 JSON
 }
 for who in root nobody; do
@@ -759,6 +761,8 @@ for who in root nobody; do
     grep -a -q -E '^Max open files +1024 +524288 +files' "${case_dir}/hvc.log" \
         || fail "the open-file limits are not 1024/524288"
     expect_line hvc.log 65536
+    grep -a -q -E '^Max open files +65536 +524288 +files' "${case_dir}/hvc.log" \
+        || fail "after raising the soft limit the limits are not 65536/524288"
     expect_report '"code":0,"signal":null,"reason":"exited"'
     show_logs "${before}"
 done

@@ -93,6 +93,8 @@ check cgroup_root cgroup_root
 check cgroup_mount cgroup_mount
 check cgroup_writable sh -c 'mkdir /sys/fs/cgroup/init-features && rmdir /sys/fs/cgroup/init-features'
 # The image's init system starts with the open-file limits the init sets.
+# Both guest shells (dash and BusyBox ash) support -Hn.
+# shellcheck disable=SC3045
 check open_files_hard test "$(ulimit -Hn)" -ge 524288
 check sys_readonly sh -c 'grep " /sys sysfs " /proc/mounts | grep -q "[ ,]ro[ ,]"'
 check no_kernel_threads_of_the_machine sh -c '! grep -q -x -s kthreadd /proc/*/comm'

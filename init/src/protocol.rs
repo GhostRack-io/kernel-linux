@@ -1,5 +1,5 @@
 //! The JSON lines between the init and the host (interface versions 1 to
-//! 6): the reports the init sends, the commands it accepts and its
+//! 7): the reports the init sends, the commands it accepts and its
 //! answers.
 
 use crate::config::MAX_STOP_TIMEOUT_SECONDS;
@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The interface versions whose lines this init speaks.
-pub const VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6];
+pub const VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6, 7];
 
 /// The boot's interface version (`gh.v`), which every line carries as
 /// `v`; 1 until the command line names a supported one.

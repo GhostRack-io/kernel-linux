@@ -1,11 +1,11 @@
 //! The kernel command line's `gh.*` parameters (interface versions 1 to
-//! 6).
+//! 7).
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// The interface versions this init accepts.
-pub const VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6];
+pub const VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6, 7];
 
 /// The network and identity the agent gives the instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn other_versions_refused() {
-        for version in ["7", "0", "", "1.0", "one"] {
+        for version in ["8", "0", "", "1.0", "one"] {
             let line = FULL.replace("gh.v=1", &format!("gh.v={version}"));
             assert!(parse(&line).unwrap_err().contains("version"), "{version}");
         }
@@ -224,6 +224,8 @@ mod tests {
         assert_eq!(args.version, 5);
         let args = parse(&FULL.replace("gh.v=1", "gh.v=6")).unwrap();
         assert_eq!(args.version, 6);
+        let args = parse(&FULL.replace("gh.v=1", "gh.v=7")).unwrap();
+        assert_eq!(args.version, 7);
     }
 
     #[test]
@@ -234,7 +236,8 @@ mod tests {
         assert_eq!(version("gh.v=4"), Some(4));
         assert_eq!(version("gh.v=5"), Some(5));
         assert_eq!(version("gh.v=6"), Some(6));
-        assert_eq!(version("gh.v=7"), None);
+        assert_eq!(version("gh.v=7"), Some(7));
+        assert_eq!(version("gh.v=8"), None);
         assert_eq!(version("quiet"), None);
     }
 

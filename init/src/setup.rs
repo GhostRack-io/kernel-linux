@@ -66,8 +66,21 @@ pub fn run() -> ! {
     console::set_on_disk();
     grow::root(DISK);
     system_mounts().unwrap_or_else(|error| fail(&error));
+    // A state disk can cover the target of an image's /run symlink.
+    // Remember this tmpfs before installing any further mounts.
+    let identity = config.instance_identity.as_deref().map(|secret| {
+        let device = fs::metadata("/run")
+            .unwrap_or_else(|error| {
+                fail(&format!("checking /run for the identity failed: {error}"))
+            })
+            .dev();
+        (secret, device)
+    });
     disks::mount_all(&config.disks).unwrap_or_else(|error| fail(&error));
     identity_files(&args).unwrap_or_else(|error| fail(&error));
+    if let Some((secret, device)) = identity {
+        write_identity(secret, device).unwrap_or_else(|error| fail(&error));
+    }
     network(&args).unwrap_or_else(|error| fail(&format!("network setup failed: {error}")));
     if let Some(keys) = &config.authorized_keys {
         write_authorized_keys(keys).unwrap_or_else(|error| fail(&error));
@@ -341,6 +354,30 @@ fn identity_files(args: &KernelArgs) -> Result<(), String> {
             .map_err(|error| format!("mounting {target} failed: {error}"))?;
     }
     Ok(())
+}
+
+/// Install the secret only on the fresh /run tmpfs, before the image runs.
+fn write_identity(secret: &str, device: u64) -> Result<(), String> {
+    const FILE: &str = "/run/ghostrack/identity";
+    if fs::metadata(OUR_FILES)
+        .map_err(|error| format!("checking {FILE} failed: {error}"))?
+        .dev()
+        != device
+    {
+        return Err(format!(
+            "creating {FILE} failed: its directory is outside the /run tmpfs"
+        ));
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(FILE)
+        .map_err(|error| format!("creating {FILE} failed: {error}"))?;
+    std::os::unix::fs::fchown(&file, Some(0), Some(0))
+        .map_err(|error| format!("setting the owner of {FILE} failed: {error}"))?;
+    writeln!(file, "{secret}").map_err(|error| format!("writing {FILE} failed: {error}"))
 }
 
 /// Makes sure there is something to mount over: an existing file or

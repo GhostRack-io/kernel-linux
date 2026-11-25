@@ -1,9 +1,9 @@
 //! The machine's configuration, read from `fw_cfg` (interface versions 1
-//! to 6): the process to run (from version 3, possibly the image's own
+//! to 7): the process to run (from version 3, possibly the image's own
 //! init system; from version 5 with the image's volume paths; from version
-//! 6 with state disks), or (version 2's unpack mode) the image layers to
-//! unpack onto the root disk (from version 4, possibly a redeploy keeping
-//! some of its paths).
+//! 6 with state disks; from version 7 with an instance identity), or the
+//! image layers to unpack onto the root disk (version 2's unpack mode,
+//! from version 4 possibly a redeploy keeping some paths).
 //!
 //! The config may carry secrets (environment values, keys), so no error
 //! message here quotes a value: they name the field at most.
@@ -64,7 +64,7 @@ const DEFAULT_STOP_SIGNAL: i32 = 15;
 pub const MAX_SIGNAL: i32 = 64;
 
 /// The config versions this init accepts.
-pub const VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6];
+pub const VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7];
 
 /// The first config version with `init_system`.
 const INIT_SYSTEM_VERSION: u64 = 3;
@@ -77,6 +77,9 @@ const VOLUMES_VERSION: u64 = 5;
 
 /// The first config version with the run mode's `disks`.
 const DISKS_VERSION: u64 = 6;
+
+/// The first run config version with an instance identity.
+const IDENTITY_VERSION: u64 = 7;
 
 /// The most state disks a run config may list.
 pub const MAX_DISKS: usize = 8;
@@ -199,6 +202,9 @@ pub struct Config {
     /// the other fields.
     #[serde(skip)]
     pub disks: Vec<Disk>,
+    /// Version 7's bootstrap secret, validated separately so explicit null is refused.
+    #[serde(skip)]
+    pub instance_identity: Option<String>,
 }
 
 /// One of version 6's state disks: the virtio-blk disk whose serial is
@@ -278,16 +284,18 @@ const FIELDS: &[&str] = &[
     "init_system",
     "volumes",
     "disks",
+    "instance_identity",
 ];
 
 /// Whether `key` is a run field of config `version`: `init_system` is
 /// version 3's, unknown to versions 1 and 2, `volumes` version 5's and
-/// `disks` version 6's.
+/// `disks` version 6's and `instance_identity` version 7's.
 fn known_field(key: &str, version: u64) -> bool {
     FIELDS.contains(&key)
         && (key != "init_system" || version >= INIT_SYSTEM_VERSION)
         && (key != "volumes" || version >= VOLUMES_VERSION)
         && (key != "disks" || version >= DISKS_VERSION)
+        && (key != "instance_identity" || version >= IDENTITY_VERSION)
 }
 
 /// Names what in `value` keeps it from parsing, without quoting a value.
@@ -415,6 +423,7 @@ fn run_config(value: &mut Value, version: u64) -> Result<Config, String> {
     if (version < INIT_SYSTEM_VERSION && value.get("init_system").is_some())
         || (version < VOLUMES_VERSION && value.get("volumes").is_some())
         || (version < DISKS_VERSION && value.get("disks").is_some())
+        || (version < IDENTITY_VERSION && value.get("instance_identity").is_some())
     {
         // Not a field of this version: refused as any unknown field.
         return Err(diagnose(value, version));
@@ -425,6 +434,9 @@ fn run_config(value: &mut Value, version: u64) -> Result<Config, String> {
     let disks = value
         .as_object_mut()
         .and_then(|object| object.remove("disks"));
+    let identity = value
+        .as_object_mut()
+        .and_then(|object| object.remove("instance_identity"));
     let mut config = Config::deserialize(&*value).map_err(|_| diagnose(value, version))?;
     check(&config)?;
     if let Some(volumes) = volumes {
@@ -432,6 +444,17 @@ fn run_config(value: &mut Value, version: u64) -> Result<Config, String> {
     }
     if let Some(disks) = disks {
         config.disks = state_disks(&disks)?;
+    }
+    if let Some(identity) = identity {
+        if let Value::String(secret) = identity
+            && parse_hex_32(&secret).is_some()
+        {
+            config.instance_identity = Some(secret);
+        } else {
+            return Err(
+                "config field `instance_identity` must be 64 lowercase hexadecimal digits".into(),
+            );
+        }
     }
     Ok(config)
 }
@@ -739,7 +762,12 @@ fn layer(index: usize, entry: &Value) -> Result<Layer, String> {
 
 /// `sha256:` and 64 lowercase hex digits, as bytes.
 fn parse_digest(text: &str) -> Option<[u8; 32]> {
-    let hex = text.strip_prefix("sha256:")?.as_bytes();
+    parse_hex_32(text.strip_prefix("sha256:")?)
+}
+
+/// Decode 32 bytes written as 64 lowercase hex digits.
+fn parse_hex_32(text: &str) -> Option<[u8; 32]> {
+    let hex = text.as_bytes();
     if hex.len() != 64 {
         return None;
     }
@@ -1416,6 +1444,57 @@ mod tests {
         assert_eq!(
             parse_boot(r#"{"version": 4, "argv": ["a"]}"#, 5).unwrap_err(),
             "the config's version is not the boot's interface version (gh.v)"
+        );
+    }
+
+    #[test]
+    fn version_seven_identity() {
+        let secret = "0123456789abcdef".repeat(4);
+        let mut value = serde_json::json!({"version": 7, "argv": ["a"]});
+        let Boot::Run(config) = parse_boot(&value.to_string(), 7).unwrap() else {
+            panic!()
+        };
+        assert!(config.instance_identity.is_none());
+        value["instance_identity"] = serde_json::json!(secret);
+        let Boot::Run(config) = parse_boot(&value.to_string(), 7).unwrap() else {
+            panic!()
+        };
+        assert!(
+            config
+                .instance_identity
+                .as_ref()
+                .is_some_and(|value| value == &secret)
+        );
+        assert!(!format!("{config:?}").contains(&secret));
+
+        for version in 1..7 {
+            value["version"] = version.into();
+            assert_eq!(
+                parse_boot(&value.to_string(), version).unwrap_err(),
+                "the config has an unknown field `instance_identity`"
+            );
+        }
+        value["version"] = 7.into();
+        for invalid in [
+            Value::Null,
+            serde_json::json!(7),
+            serde_json::json!([secret]),
+            secret.to_uppercase().into(),
+            "f".repeat(63).into(),
+            "f".repeat(65).into(),
+            "g".repeat(64).into(),
+        ] {
+            value["instance_identity"] = invalid;
+            assert_eq!(
+                parse_boot(&value.to_string(), 7).unwrap_err(),
+                "config field `instance_identity` must be 64 lowercase hexadecimal digits"
+            );
+        }
+        let unpack = serde_json::json!({"version": 7, "mode": "unpack", "layers": [],
+                                        "instance_identity": secret});
+        assert_eq!(
+            parse_boot(&unpack.to_string(), 7).unwrap_err(),
+            "config field `instance_identity` is not taken in the unpack mode"
         );
     }
 

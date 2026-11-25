@@ -146,6 +146,8 @@ tar_layer "${work}/fixture.tar" \
     "link:etc/resolv.conf:${resolv_link}" \
     "dir:root/.ssh:0700" \
     "link:root/.ssh/authorized_keys:/etc/shadow" \
+    "dir:run/ghostrack:0755" \
+    "file:run/ghostrack/identity:0644:from-the-image" \
     "dir:data:0755" \
     "owner:65534:65534" \
     "dir:run/app:0750" \
@@ -160,6 +162,7 @@ v2_cmdline="console=ttyS0 quiet gh.v=2 gh.hostname=case-host ${network}"
 v3_cmdline="console=ttyS0 quiet gh.v=3 gh.hostname=case-host ${network}"
 v5_cmdline="console=ttyS0 quiet gh.v=5 gh.hostname=case-host ${network}"
 v6_cmdline="console=ttyS0 quiet gh.v=6 gh.hostname=case-host ${network}"
+v7_cmdline="console=ttyS0 quiet gh.v=7 gh.hostname=case-host ${network}"
 unpack_cmdline=${v2_cmdline}
 
 failures=0
@@ -590,7 +593,7 @@ expect_absent serial.log '"event":"started"'
 expect_absent hvc.log ran
 show_logs "${before}"
 before=${failures}
-boot cmdline-v7 '{"version":1,"argv":["/bin/sh","-c","echo ran"]}' "console=ttyS0 quiet gh.v=7 gh.hostname=case-host ${network}"
+boot cmdline-v8 '{"version":1,"argv":["/bin/sh","-c","echo ran"]}' "console=ttyS0 quiet gh.v=8 gh.hostname=case-host ${network}"
 expect_report '"reason":"error","message":"gh.v names an interface version this init does not support"'
 expect_absent serial.log '"event":"started"'
 show_logs "${before}"
@@ -906,12 +909,66 @@ expect_absent serial.log '"event":"started"'
 expect_absent hvc.log ran
 show_logs "${before}"
 
+# Version 7's bootstrap secret lives only on the tmpfs. Check its exact
+# bytes by digest so the image never gets the secret through argv.
+identity=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+identity_digest=$(printf '%s\n' "${identity}" | sha256sum | cut -d' ' -f1)
+config=$(cat <<JSON
+{"version":7,"instance_identity":"${identity}","argv":["/bin/sh","-ec",
+"f=/run/ghostrack/identity; test \"\$(stat -c %u:%g:%a \"\$f\")\" = 0:0:600; echo '${identity_digest}  /run/ghostrack/identity' | sha256sum -c >/dev/null"]}
+JSON
+)
+boot identity "${config}" "${v7_cmdline}"
+expect_started 7
+expect_report '{"v":7,"event":"exited","code":0,"signal":null,"reason":"exited"}'
+if grep -aFq "${identity}" "${case_dir}/disk.img" "${case_dir}/serial.log" "${case_dir}/hvc.log"; then
+    fail "bootstrap secret persisted on disk or appeared on a console"
+fi
+[[ $(debugfs -R 'cat /run/ghostrack/identity' "${case_dir}/disk.img" 2>/dev/null) == from-the-image ]] \
+    || fail "the image's identity placeholder changed"
+
+# Both copies must exist and refuse a read by an ordinary image user.
+config=$(cat <<JSON
+{"version":7,"user":"65534:65534","instance_identity":"${identity}","argv":["/bin/sh","-ec",
+"for f in /run/ghostrack/identity /sys/firmware/qemu_fw_cfg/by_name/opt/ghostrack/config/raw; do test -f \"\$f\"; if cat \"\$f\" >/dev/null 2>&1; then exit 1; fi; done"]}
+JSON
+)
+boot identity-user "${config}" "${v7_cmdline}"
+expect_started 7
+expect_report '{"v":7,"event":"exited","code":0,"signal":null,"reason":"exited"}'
+for version in 6 7; do
+    config="{\"version\":${version},\"argv\":[\"/bin/sh\",\"-ec\",\"test ! -e /run/ghostrack/identity\"]}"
+    boot "identity-absent-v${version}" "${config}" "${v7_cmdline/gh.v=7/gh.v=${version}}"
+    expect_started "${version}"
+    expect_report "\"v\":${version},\"event\":\"exited\",\"code\":0,\"signal\":null,\"reason\":\"exited\""
+done
+
 # state_disk_args NAME FILE SERIAL: QEMU's arguments for FILE as a
 # virtio-blk disk with the virtio serial SERIAL, as the host sets libvirt's
 # <serial>.
 state_disk_args() {
     printf '%s\n' -drive "file=$2,format=raw,if=none,id=$1" -device "virtio-blk-pci,drive=$1,serial=$3"
 }
+
+# An image may use a symlink for /run. If a state disk covers its target
+# after init mounts the tmpfs, fail the boot before writing the identity.
+config='{"version":7,"instance_identity":"'${identity}'","disks":[{"serial":"state-1","path":"/data"}],"argv":["/bin/true"]}'
+new_case identity-shadowed "${config}"
+cp --sparse=always "${work}/disk.img" "${case_dir}/disk.img"
+debugfs -w -f - "${case_dir}/disk.img" >/dev/null 2>&1 <<'DEBUGFS'
+link /run /image-run
+unlink /run
+symlink /run /data
+DEBUGFS
+mkfs.ext4 -q -F -E root_owner=0:0 "${case_dir}/state.img" 64M >/dev/null
+mapfile -t qemu_extra < <(state_disk_args state0 "${case_dir}/state.img" state-1)
+qemu "${v7_cmdline}" "${case_timeout}" "${case_dir}/disk.img"
+qemu_extra=()
+expect_absent serial.log '"event":"started"'
+expect_report '"reason":"error","message":"creating /run/ghostrack/identity failed: its directory is outside the /run tmpfs"'
+if grep -aFq "${identity}" "${case_dir}/state.img" "${case_dir}/disk.img"; then
+    fail "bootstrap secret persisted on disk"
+fi
 
 # 12. Version 6's state disk: found by its serial, mounted at /state
 # (nodev, nosuid, noatime) and grown with its disk; its directory app is

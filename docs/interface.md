@@ -1,4 +1,4 @@
-# The host ↔ init interface, versions 1 to 6
+# The host ↔ init interface, versions 1 to 7
 
 This is the contract between the host that boots a container machine (the
 agent) and `ghostrack-init`, the init in this repository's initramfs. It is
@@ -6,7 +6,7 @@ written for agent authors: everything the agent writes and everything it
 reads back is here.
 
 A release's `build-info.json` lists the interface versions its init accepts
-(`"interface_versions": [1, 2, 3, 4, 5, 6]`). Any change to the kernel command line, the
+(`"interface_versions": [1, 2, 3, 4, 5, 6, 7]`). Any change to the kernel command line, the
 config or the vsock lines below is a new interface version.
 
 Release 6.18.57-gh8 renamed the init's names, in every interface version:
@@ -51,6 +51,9 @@ image, so what the image keeps there outlives its root disk. A boot of
 an earlier version behaves exactly as before; a version-6 boot is
 version 5's in everything else.
 
+Version 7 adds the optional run field `instance_identity`. When supplied,
+init installs the bootstrap secret before starting the image process.
+
 In every version, since release 6.18.57-gh6, the run mode's `/run`
 starts as a copy of the image's own `/run` (step 4 below), and the run
 mode's process is PID 1 of PID, mount and cgroup namespaces of its own
@@ -74,7 +77,7 @@ kernel boot (QEMU `-kernel`, `-initrd`, `-append`, or libvirt's `<kernel>`,
 - the renter's root disk as the first virtio-blk disk (`/dev/vda`), ext4;
 - in the unpack mode only, the layers disk as the second virtio-blk disk
   (`/dev/vdb`), read-only (see The unpack mode);
-- in the run mode of version 6, the config's state disks as further
+- in the run mode from version 6, the config's state disks as further
   virtio-blk disks, each with its virtio serial (QEMU
   `-device virtio-blk-pci,serial=...`, libvirt's `<serial>`), in any
   order after the root disk: the init finds them by serial, not by name
@@ -120,7 +123,7 @@ console=ttyS0 quiet gh.v=V gh.hostname=NAME gh.ip4=A.B.C.D/P gh.gw4=A.B.C.D
 
 | Key | Required | Value |
 |---|---|---|
-| `gh.v` | yes | The interface version, `1` to `6`. Any other value is refused. |
+| `gh.v` | yes | The interface version, `1` to `7`. Any other value is refused. |
 | `gh.hostname` | yes | The host name: dot-separated labels of letters, digits and hyphens (no label starting or ending with a hyphen), 64 bytes at most. |
 | `gh.ip4` | yes | `eth0`'s IPv4 address and prefix length, `A.B.C.D/P` (P 0–32). |
 | `gh.gw4` | yes | The IPv4 default gateway. A gateway outside `gh.ip4`'s prefix gets an on-link host route first. |
@@ -147,7 +150,7 @@ but cannot be opened or read is an error, and the old one is not read.
 With neither entry, the boot ends in an error report.
 
 A config is of one of two modes. The **run mode** runs the image's
-process; it is all of version 1 and the default of versions 2 to 6:
+process; it is all of version 1 and the default of versions 2 to 7:
 
 ```json
 { "version": 1,
@@ -162,8 +165,8 @@ process; it is all of version 1 and the default of versions 2 to 6:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `version` | yes | The boot's `gh.v`: `1` to `6`. Any other value is refused. |
-| `mode` | no | Versions 2 to 6: `"run"` (the default). |
+| `version` | yes | The boot's `gh.v`: `1` to `7`. Any other value is refused. |
+| `mode` | no | Versions 2 to 7: `"run"` (the default). |
 | `argv` | yes | The process and its arguments, not empty. `argv[0]` is searched in the process's `PATH` unless it holds a `/`. The image's entrypoint and command, with the renter's overrides, already combined by the agent. |
 | `env` | no | `KEY=value` entries (a key is not empty). Default: none. |
 | `user` | no | Docker's `user[:group]`, by name or number. Default: root (uid 0, gid 0). |
@@ -171,9 +174,10 @@ process; it is all of version 1 and the default of versions 2 to 6:
 | `stop_timeout_seconds` | no | How long a stop waits for the process after the stop signal, 0–300. Default: 10. |
 | `stop_signal` | no | The signal a stop sends the process first, as a number, 1–64: the image's `STOPSIGNAL` (for example 3 for `SIGQUIT`). Default: 15 (`SIGTERM`). |
 | `authorized_keys` | no | SSH keys for the platform's stock images: `user` (a name, or a uid; a uid absent from the image's /etc/passwd has home `/`, so the keys go to `/.ssh/authorized_keys`) and `keys` (one key per entry, no line breaks). |
-| `init_system` | no | Version 3 only: `true` runs `argv` as the image's init system (see The init system), `false` (the default) as a process. With `true`, `argv[0]` must be an absolute path (`/sbin/init`, `/lib/systemd/systemd`, `/sbin/openrc-init`: the agent chooses), `user` absent or root (`root`, `0`, `0:0`, `root:root`, `root:0`, `0:root`) and `workdir` absent or `/`; anything else is refused. |
-| `volumes` | no | Version 5 only: the image's `VOLUME` paths, 0 to 64 of them, each absolute and normalised (no `.`, `..` or empty component, no trailing `/`), at most 4095 bytes, not `/` itself, none given twice. Each the image lacks is made a directory before the process starts (see step 7 below). Default: none. |
-| `disks` | no | Version 6 only: the state disks, 0 to 8 of them, each `serial`, `path` and `binds`, nothing else (see step 4a below). Default: none. |
+| `init_system` | no | From version 3: `true` runs `argv` as the image's init system (see The init system), `false` (the default) as a process. With `true`, `argv[0]` must be an absolute path (`/sbin/init`, `/lib/systemd/systemd`, `/sbin/openrc-init`: the agent chooses), `user` absent or root (`root`, `0`, `0:0`, `root:root`, `root:0`, `0:root`) and `workdir` absent or `/`; anything else is refused. |
+| `volumes` | no | From version 5: the image's `VOLUME` paths, 0 to 64 of them, each absolute and normalised (no `.`, `..` or empty component, no trailing `/`), at most 4095 bytes, not `/` itself, none given twice. Each the image lacks is made a directory before the process starts (see step 7 below). Default: none. |
+| `instance_identity` | no | From version 7: a 32-byte secret encoded as exactly 64 lowercase hexadecimal digits. Omit when unused. |
+| `disks` | no | From version 6: the state disks, 0 to 8 of them, each `serial`, `path` and `binds`, nothing else (see step 4a below). Default: none. |
 | `disks[].serial` | yes | The disk's virtio serial: 1 to 20 letters, digits, `.`, `_` and `-`, none given twice. |
 | `disks[].path` | yes | Where the disk is mounted: absolute and normalised, at most 4095 bytes, not `/`, not `/proc`, `/sys`, `/dev` or `/run` or below them. |
 | `disks[].binds` | no | 0 to 16 binds, each `source` and `path`, nothing else. Default: none. |
@@ -183,13 +187,13 @@ process; it is all of version 1 and the default of versions 2 to 6:
 Unknown fields are refused, at the top level and inside `authorized_keys`;
 a version-1 config has no `mode`, a version-1 or version-2 config no
 `init_system`, a config before version 5 no `volumes` and a config
-before version 6 no `disks` (each refused as an unknown field). No
+before version 6 no `disks`, and before version 7 no `instance_identity` (each refused as an unknown field). No
 disk's or bind's `path` may be another's, nor inside or above another's
 (each mount covers a place of its own). No string may hold a NUL byte. A boot refuses a config of a later version
 than its own as one it does not support (as it did before that version
 existed), and one of an earlier version as not the boot's.
 
-The **unpack mode** (versions 2 to 6) unpacks the image's layers onto the root
+The **unpack mode** (versions 2 to 7) unpacks the image's layers onto the root
 disk and runs nothing:
 
 ```json
@@ -203,18 +207,18 @@ disk and runs nothing:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `version` | yes | `2` to `6`, the boot's `gh.v`. |
+| `version` | yes | `2` to `7`, the boot's `gh.v`. |
 | `mode` | yes | `"unpack"`. |
 | `layers` | yes | The image's layers, lowest first, 1 to 128 of them, as the image's manifest lists them. Each: `media_type`, `digest` and `size`, nothing else. |
 | `layers[].media_type` | yes | `application/vnd.oci.image.layer.v1.tar`, `application/vnd.oci.image.layer.v1.tar+gzip`, `application/vnd.oci.image.layer.v1.tar+zstd` or `application/vnd.docker.image.rootfs.diff.tar.gzip`. Any other (a non-distributable or foreign layer among them) is refused. |
 | `layers[].digest` | yes | The blob's digest: `sha256:` and 64 lowercase hex digits. |
 | `layers[].size` | yes | The blob's length in bytes, at least 1. |
-| `keep` | no | Versions 4 to 6: present (even empty), the unpack is a redeploy (see The redeploy). The paths of the root disk to keep, 0 to 64 of them: each absolute and normalised (no `.`, `..` or empty component, no trailing `/`), at most 4095 bytes, not `/` itself, none given twice. |
+| `keep` | no | Versions 4 to 7: present (even empty), the unpack is a redeploy (see The redeploy). The paths of the root disk to keep, 0 to 64 of them: each absolute and normalised (no `.`, `..` or empty component, no trailing `/`), at most 4095 bytes, not `/` itself, none given twice. |
 
 A config is of one mode: an unpack config with any run field (`argv`,
 `env`, `user`, `workdir`, `stop_timeout_seconds`, `stop_signal`,
 `authorized_keys`, from version 3 `init_system`, from version 5
-`volumes`, in version 6 `disks`) is refused, and so is a run config with `layers` (or `keep`, in any
+`volumes`, from version 6 `disks`, from version 7 `instance_identity`) is refused, and so is a run config with `layers` (or `keep`, in any
 version: it is an unknown field there, as it is in an unpack config
 before version 4).
 
@@ -326,6 +330,13 @@ These are the run mode's steps; the unpack mode's follow.
    point `/etc/resolv.conf` elsewhere), the link is covered, never followed,
    so nothing on the disk is written. The process sees and may change the
    init's copies; the disk's own files stay as they are.
+
+   With `instance_identity`, the init creates `/run/ghostrack/identity`
+   on the guest's tmpfs before the process starts. The file is owned by
+   root:root with mode 0600 and contains the supplied hex digits followed
+   by one newline. Installation failure ends the boot with an error. With
+   the field omitted, the init creates no identity file. The firmware
+   config's sysfs `raw` file is also readable only by root.
 6. Brings up `lo` and `eth0`: the addresses, the routes and the MTU from
    the command line.
 7. With `authorized_keys`: writes the keys, one per line, to the user's
@@ -535,7 +546,7 @@ manage devices (`/sys` is read-only). An image's init that expects
 virtual terminals (gettys on `tty1`…) finds none: images drop them
 (Alpine's `/etc/inittab` lines `tty1::respawn:...`, for example).
 
-## The unpack mode (versions 2 to 6)
+## The unpack mode (versions 2 to 7)
 
 For a new container instance the agent:
 
@@ -547,13 +558,13 @@ For a new container instance the agent:
    no padding, so layer *i* starts at the sum of the sizes before it. The
    disk may be longer (a tail to a whole block); the bytes past the last
    layer are ignored;
-3. boots once with `gh.v=2` (or `3` to `6`), the unpack config, the root disk as
+3. boots once with `gh.v=2` (or `3` to `7`), the unpack config, the root disk as
    `/dev/vda` and the layers disk as `/dev/vdb`, read-only (QEMU
    `readonly=on`, libvirt `<readonly/>`); the rest of the machine is as
    for a run boot;
 4. when the domain has ended and the last report is `unpacked`, detaches
    the layers disk and from then on boots the instance in the run mode
-   (version 1, or version 2 to 6 with `"mode": "run"`). Any other end (an
+   (version 1, or version 2 to 7 with `"mode": "run"`). Any other end (an
    `error` report, no report, a timeout of its own) leaves a disk that
    is not to be used: the agent starts again from step 1.
 
@@ -740,7 +751,7 @@ serial log for lines starting with `ghostrack-init: report `, or
   - `reason`: `exited` (it ended by itself), `stopped` (it ended after a
     stop command, whatever its status), `error` (the init could not
     start it, or in the unpack mode could not unpack the layers; `code`
-    and `signal` are `null`), in the unpack mode (versions 2 to 6)
+    and `signal` are `null`), in the unpack mode (versions 2 to 7)
     `unpacked` (every layer is on the root disk; `code` 0) or, with
     version 3's `init_system`, `poweroff` or `reboot` (the image's init
     powered off, halted or rebooted; see The init system). An agent

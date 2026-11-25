@@ -918,7 +918,7 @@ config=$(cat <<JSON
 "f=/run/ghostrack/identity; test \"\$(stat -c %u:%g:%a \"\$f\")\" = 0:0:600; echo '${identity_digest}  /run/ghostrack/identity' | sha256sum -c >/dev/null"]}
 JSON
 )
-boot identity "${config}" "${v7_cmdline}"
+boot instance-identity "${config}" "${v7_cmdline}"
 expect_started 7
 expect_report '{"v":7,"event":"exited","code":0,"signal":null,"reason":"exited"}'
 if grep -aFq "${identity}" "${case_dir}/disk.img" "${case_dir}/serial.log" "${case_dir}/hvc.log"; then

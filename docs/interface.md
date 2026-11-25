@@ -334,9 +334,13 @@ These are the run mode's steps; the unpack mode's follow.
    With `instance_identity`, the init creates `/run/ghostrack/identity`
    on the guest's tmpfs before the process starts. The file is owned by
    root:root with mode 0600 and contains the supplied hex digits followed
-   by one newline. Installation failure ends the boot with an error. With
-   the field omitted, the init creates no identity file. The firmware
-   config's sysfs `raw` file is also readable only by root.
+   by one newline. With the field omitted in version 7, the path must
+   be absent. A symbolic link for `/run` is supported if it resolves
+   without a procfs magic link and state mounts leave the init's tmpfs
+   directory visible. Before starting the process, the init verifies the
+   installed file or its absence in the process's final mount namespace.
+   Failure ends the boot with an error. The firmware config's sysfs
+   `raw` file is also readable only by root.
 6. Brings up `lo` and `eth0`: the addresses, the routes and the MTU from
    the command line.
 7. With `authorized_keys`: writes the keys, one per line, to the user's

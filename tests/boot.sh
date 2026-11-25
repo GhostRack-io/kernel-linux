@@ -913,12 +913,12 @@ show_logs "${before}"
 # bytes by digest so the image never gets the secret through argv.
 identity=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 identity_digest=$(printf '%s\n' "${identity}" | sha256sum | cut -d' ' -f1)
-config=$(cat <<JSON
+identity_config=$(cat <<JSON
 {"version":7,"instance_identity":"${identity}","argv":["/bin/sh","-ec",
 "f=/run/ghostrack/identity; test \"\$(stat -c %u:%g:%a \"\$f\")\" = 0:0:600; echo '${identity_digest}  /run/ghostrack/identity' | sha256sum -c >/dev/null"]}
 JSON
 )
-boot instance-identity "${config}" "${v7_cmdline}"
+boot instance-identity "${identity_config}" "${v7_cmdline}"
 expect_started 7
 expect_report '{"v":7,"event":"exited","code":0,"signal":null,"reason":"exited"}'
 if grep -aFq "${identity}" "${case_dir}/disk.img" "${case_dir}/serial.log" "${case_dir}/hvc.log"; then
@@ -950,25 +950,74 @@ state_disk_args() {
     printf '%s\n' -drive "file=$2,format=raw,if=none,id=$1" -device "virtio-blk-pci,drive=$1,serial=$3"
 }
 
-# An image may use a symlink for /run. If a state disk covers its target
-# after init mounts the tmpfs, fail the boot before writing the identity.
-config='{"version":7,"instance_identity":"'${identity}'","disks":[{"serial":"state-1","path":"/data"}],"argv":["/bin/true"]}'
-new_case identity-shadowed "${config}"
-cp --sparse=always "${work}/disk.img" "${case_dir}/disk.img"
-debugfs -w -f - "${case_dir}/disk.img" >/dev/null 2>&1 <<'DEBUGFS'
+# A disk image with /run pointing elsewhere. Retain the original image
+# directory under /image-run when changing the directory entry.
+linked_run_disk() {
+    cp --sparse=always "${work}/disk.img" "${case_dir}/disk.img"
+    debugfs -w -f - "${case_dir}/disk.img" >/dev/null 2>&1 <<DEBUGFS
 link /run /image-run
 unlink /run
-symlink /run /data
+symlink /run $1
 DEBUGFS
-mkfs.ext4 -q -F -E root_owner=0:0 "${case_dir}/state.img" 64M >/dev/null
-mapfile -t qemu_extra < <(state_disk_args state0 "${case_dir}/state.img" state-1)
+}
+
+# Ordinary symlinks work. The namespace's fresh procfs, however, covers
+# the tmpfs if the image pointed /run into the old procfs.
+new_case identity-linked-run "${identity_config}"
+linked_run_disk /data
 qemu "${v7_cmdline}" "${case_timeout}" "${case_dir}/disk.img"
-qemu_extra=()
+expect_started 7
+expect_report '"v":7,"event":"exited","code":0,"signal":null,"reason":"exited"'
+new_case identity-hidden-by-proc "${identity_config}"
+linked_run_disk /proc/fs
+qemu "${v7_cmdline}" "${case_timeout}" "${case_dir}/disk.img"
 expect_absent serial.log '"event":"started"'
-expect_report '"reason":"error","message":"creating /run/ghostrack/identity failed: its directory is outside the /run tmpfs"'
-if grep -aFq "${identity}" "${case_dir}/state.img" "${case_dir}/disk.img"; then
-    fail "bootstrap secret persisted on disk"
-fi
+expect_report '"reason":"error","message":"checking /run/ghostrack/identity in the payload namespace failed:'
+
+# A volume could create an entry at the omitted bootstrap path later in
+# setup, even if it was absent when the init installed its runtime files.
+boot identity-absent-volume '{"version":7,"volumes":["/run/ghostrack/identity"],"argv":["/bin/true"]}' "${v7_cmdline}"
+expect_absent serial.log '"event":"started"'
+expect_report '"reason":"error","message":"checking /run/ghostrack/identity in the payload namespace failed:'
+
+# A state disk shadowing the tmpfs can carry its own bootstrap file.
+# Version 7 must fail before writing anything in that directory, whether
+# the secret was supplied or omitted. Version 6 keeps its former view.
+for variant in supplied omitted legacy; do
+    version=7
+    field=
+    argv='["/bin/true"]'
+    case ${variant} in
+        supplied) field='"instance_identity":"'${identity}'",' ;;
+        legacy)
+            version=6
+            argv='["/bin/sh","-ec","grep -qx from-state /run/ghostrack/identity"]'
+            ;;
+    esac
+    config='{"version":'${version}','${field}'"disks":[{"serial":"state-1","path":"/data"}],"argv":'${argv}'}'
+    new_case "identity-shadowed-${variant}" "${config}"
+    linked_run_disk /data
+    mkdir -p "${case_dir}/state/ghostrack"
+    printf %s from-state > "${case_dir}/state/ghostrack/identity"
+    mkfs.ext4 -q -F -d "${case_dir}/state" -E root_owner=0:0 "${case_dir}/state.img" 64M >/dev/null
+    mapfile -t qemu_extra < <(state_disk_args state0 "${case_dir}/state.img" state-1)
+    qemu "${v7_cmdline/gh.v=7/gh.v=${version}}" "${case_timeout}" "${case_dir}/disk.img"
+    qemu_extra=()
+    if [[ ${version} == 7 ]]; then
+        expect_absent serial.log '"event":"started"'
+        expect_report '"reason":"error","message":"checking /run/ghostrack/identity failed: its runtime directory is hidden"'
+        [[ $(debugfs_ls "${case_dir}/state.img" /ghostrack) == identity ]] \
+            || fail "init wrote runtime files to the state disk"
+    else
+        expect_started 6
+        expect_report '"v":6,"event":"exited","code":0,"signal":null,"reason":"exited"'
+    fi
+    [[ $(debugfs -R 'cat /ghostrack/identity' "${case_dir}/state.img" 2>/dev/null) == from-state ]] \
+        || fail "the state disk's identity file changed"
+    if grep -aFq "${identity}" "${case_dir}/state.img" "${case_dir}/disk.img"; then
+        fail "bootstrap secret persisted on disk"
+    fi
+done
 
 # 12. Version 6's state disk: found by its serial, mounted at /state
 # (nodev, nosuid, noatime) and grown with its disk; its directory app is

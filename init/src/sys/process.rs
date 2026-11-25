@@ -26,12 +26,48 @@ pub struct Spawn {
 
 /// Where the process's namespaces start.
 pub struct Namespace {
+    pub identity: InstanceIdentity,
     /// The `cgroup.procs` of the cgroup that becomes the cgroup
     /// namespace's root.
     pub cgroup_procs: CString,
     /// The device bound over `/dev/console` inside, when there is one
     /// (`/dev/hvc0`).
     pub console: Option<CString>,
+}
+
+/// What must be visible at the bootstrap path after the namespace mounts.
+#[derive(Clone, Copy)]
+pub enum InstanceIdentity {
+    /// Interfaces before version 7 have no bootstrap path contract.
+    Unchecked,
+    Absent,
+    Installed {
+        dev: u64,
+        ino: u64,
+    },
+}
+
+impl InstanceIdentity {
+    fn verify(self) -> io::Result<()> {
+        if matches!(self, Self::Unchecked) {
+            return Ok(());
+        }
+        // SAFETY: stat is plain data, and lstat fills it on success. A
+        // symlink at the last component must not stand in for the file.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the path is NUL-terminated and stat is writable.
+        let result =
+            check(unsafe { libc::lstat(c"/run/ghostrack/identity".as_ptr(), &raw mut stat) });
+        match (self, result) {
+            (Self::Absent, Err(error)) if error.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+            (_, Err(error)) => Err(error),
+            (Self::Absent, Ok(_)) => Err(io::Error::from_raw_os_error(libc::EEXIST)),
+            (Self::Installed { dev, ino }, Ok(_)) if dev != stat.st_dev || ino != stat.st_ino => {
+                Err(io::Error::from_raw_os_error(libc::ESTALE))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl Spawn {
@@ -76,6 +112,8 @@ pub enum Stage {
     Namespace,
     /// The namespace's own mounts.
     Mounts,
+    /// Verifying the bootstrap path after those mounts.
+    InstanceIdentity,
 }
 
 /// `CAP_SYS_MODULE` of `<linux/capability.h>`.
@@ -94,6 +132,7 @@ impl Stage {
             Stage::Exec => 4,
             Stage::Namespace => 5,
             Stage::Mounts => 6,
+            Stage::InstanceIdentity => 7,
         }
     }
 
@@ -104,6 +143,7 @@ impl Stage {
             3 => Stage::Identity,
             5 => Stage::Namespace,
             6 => Stage::Mounts,
+            7 => Stage::InstanceIdentity,
             _ => Stage::Exec,
         }
     }
@@ -264,7 +304,11 @@ pub const SIGNAL_MAX: libc::c_int = 64;
 
 /// Writes `[stage, errno]` to the pipe and leaves the child.
 fn fail_child(report: libc::c_int, stage: Stage) -> ! {
-    let code = errno().raw_os_error().unwrap_or(libc::EIO).to_ne_bytes();
+    fail_child_with(report, stage, &errno())
+}
+
+fn fail_child_with(report: libc::c_int, stage: Stage, error: &io::Error) -> ! {
+    let code = error.raw_os_error().unwrap_or(libc::EIO).to_ne_bytes();
     let [a, b, c, d] = code;
     let message = [stage.code(), a, b, c, d];
     // SAFETY: writing a live 5-byte array, then leaving the child
@@ -313,6 +357,9 @@ fn namespace_parent(
             libc::close(gate);
             if namespace_mounts(namespace).is_err() {
                 fail_child(report, Stage::Mounts);
+            }
+            if let Err(error) = namespace.identity.verify() {
+                fail_child_with(report, Stage::InstanceIdentity, &error);
             }
             // The kernel loads no modules: without the capability in the
             // bounding set the process knows it, as under a

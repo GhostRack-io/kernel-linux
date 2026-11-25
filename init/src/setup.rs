@@ -65,29 +65,21 @@ pub fn run() -> ! {
     switch_root().unwrap_or_else(|error| fail(&error));
     console::set_on_disk();
     grow::root(DISK);
-    system_mounts().unwrap_or_else(|error| fail(&error));
-    // A state disk can cover the target of an image's /run symlink.
-    // Remember this tmpfs before installing any further mounts.
-    let identity = config.instance_identity.as_deref().map(|secret| {
-        let device = fs::metadata("/run")
-            .unwrap_or_else(|error| {
-                fail(&format!("checking /run for the identity failed: {error}"))
-            })
-            .dev();
-        (secret, device)
-    });
+    let runtime = system_mounts(args.version).unwrap_or_else(|error| fail(&error));
     disks::mount_all(&config.disks).unwrap_or_else(|error| fail(&error));
-    identity_files(&args).unwrap_or_else(|error| fail(&error));
-    if let Some((secret, device)) = identity {
-        write_identity(secret, device).unwrap_or_else(|error| fail(&error));
-    }
+    identity_files(&args, runtime.as_ref()).unwrap_or_else(|error| fail(&error));
+    let identity = match config.instance_identity.as_deref() {
+        Some(secret) => write_identity(secret).unwrap_or_else(|error| fail(&error)),
+        None if runtime.is_some() => process::InstanceIdentity::Absent,
+        None => process::InstanceIdentity::Unchecked,
+    };
     network(&args).unwrap_or_else(|error| fail(&format!("network setup failed: {error}")));
     if let Some(keys) = &config.authorized_keys {
         write_authorized_keys(keys).unwrap_or_else(|error| fail(&error));
     }
     volumes::make_all(&config.volumes);
     let listener = supervise::bind_control(args.vsock);
-    let pid = start(&config, &args).unwrap_or_else(|error| fail(&error));
+    let pid = start(&config, &args, identity).unwrap_or_else(|error| fail(&error));
     console::report(&Report::started(pid, sys::monotonic_ms()));
     supervise::run(
         pid,
@@ -235,7 +227,7 @@ fn remove_tree(directory: &Path, device: u64) {
 
 /// Step 4: devpts, /dev/shm, /dev/mqueue, cgroup2 and /run, as Docker
 /// mounts them; /run seeded with the image's own (see [`seed`]).
-fn system_mounts() -> Result<(), String> {
+fn system_mounts(version: u32) -> Result<Option<sys::fs::Stat>, String> {
     let quiet = mount::NOSUID | mount::NODEV | mount::NOEXEC;
     let each: [(&str, &str, &str, u64, &str); 4] = [
         (
@@ -301,7 +293,18 @@ fn system_mounts() -> Result<(), String> {
     if let Some(mut image_run) = image_run {
         seed_run(&mut image_run, &root);
     }
-    Ok(())
+    if version < 7 {
+        return Ok(None);
+    }
+    // Ordinary /run symlinks are supported. Reject procfs magic links,
+    // whose targets can change when the init forks or closes a descriptor.
+    let run = sys::fs::open_in_root(root.as_fd(), c"run", libc::O_DIRECTORY | libc::O_PATH)
+        .map_err(|error| format!("opening /run for the identity failed: {error}"))?;
+    sys::fs::mkdir_at(run.as_fd(), c"ghostrack", 0o755)
+        .map_err(|error| format!("creating {OUR_FILES} failed: {error}"))?;
+    sys::fs::stat_at(run.as_fd(), c"ghostrack")
+        .map(Some)
+        .map_err(|error| format!("checking {OUR_FILES} failed: {error}"))
 }
 
 /// Copies the image's /run into the tmpfs now over it; never fails the
@@ -335,11 +338,23 @@ fn seed_run(image_run: &mut sys::fs::Dir, root: &fs::File) {
 
 /// Step 5: the host name, and /etc/hosts, /etc/resolv.conf and
 /// /etc/hostname bind-mounted from /run/ghostrack.
-fn identity_files(args: &KernelArgs) -> Result<(), String> {
+fn identity_files(args: &KernelArgs, runtime: Option<&sys::fs::Stat>) -> Result<(), String> {
     sys::sethostname(&args.hostname)
         .map_err(|error| format!("setting the host name failed: {error}"))?;
-    create_dir(OUR_FILES, 0o755)
-        .map_err(|error| format!("creating {OUR_FILES} failed: {error}"))?;
+    if let Some(runtime) = runtime {
+        // Before any writes, ensure state mounts did not cover our
+        // directory through the target of an image's /run symlink.
+        if !fs::symlink_metadata(OUR_FILES)
+            .is_ok_and(|entry| entry.dev() == runtime.dev && entry.ino() == runtime.ino)
+        {
+            return Err(
+                "checking /run/ghostrack/identity failed: its runtime directory is hidden".into(),
+            );
+        }
+    } else {
+        create_dir(OUR_FILES, 0o755)
+            .map_err(|error| format!("creating {OUR_FILES} failed: {error}"))?;
+    }
     for (name, text) in [
         ("hosts", etc::hosts(args)),
         ("resolv.conf", etc::resolv_conf(args)),
@@ -357,17 +372,8 @@ fn identity_files(args: &KernelArgs) -> Result<(), String> {
 }
 
 /// Install the secret only on the fresh /run tmpfs, before the image runs.
-fn write_identity(secret: &str, device: u64) -> Result<(), String> {
+fn write_identity(secret: &str) -> Result<process::InstanceIdentity, String> {
     const FILE: &str = "/run/ghostrack/identity";
-    if fs::metadata(OUR_FILES)
-        .map_err(|error| format!("checking {FILE} failed: {error}"))?
-        .dev()
-        != device
-    {
-        return Err(format!(
-            "creating {FILE} failed: its directory is outside the /run tmpfs"
-        ));
-    }
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -377,7 +383,14 @@ fn write_identity(secret: &str, device: u64) -> Result<(), String> {
         .map_err(|error| format!("creating {FILE} failed: {error}"))?;
     std::os::unix::fs::fchown(&file, Some(0), Some(0))
         .map_err(|error| format!("setting the owner of {FILE} failed: {error}"))?;
-    writeln!(file, "{secret}").map_err(|error| format!("writing {FILE} failed: {error}"))
+    writeln!(file, "{secret}").map_err(|error| format!("writing {FILE} failed: {error}"))?;
+    let entry = file
+        .metadata()
+        .map_err(|error| format!("checking {FILE} failed: {error}"))?;
+    Ok(process::InstanceIdentity::Installed {
+        dev: entry.dev(),
+        ino: entry.ino(),
+    })
 }
 
 /// Makes sure there is something to mount over: an existing file or
@@ -533,9 +546,13 @@ fn payload_cgroup() -> Result<(), String> {
 /// container's entrypoint, PID 1 of PID, mount and cgroup namespaces of
 /// its own, the cgroup namespace's root the payload cgroup, `output`
 /// bound over `/dev/console` inside when it is the hypervisor console.
-fn namespace(output: &str) -> Result<process::Namespace, String> {
+fn namespace(
+    output: &str,
+    identity: process::InstanceIdentity,
+) -> Result<process::Namespace, String> {
     let path = |text: &str| sys::cstring(text).map_err(|_| "a path holds a NUL byte".to_owned());
     Ok(process::Namespace {
+        identity,
         cgroup_procs: path(&format!("{PAYLOAD_CGROUP}/cgroup.procs"))?,
         console: (output == "/dev/hvc0").then(|| path(output)).transpose()?,
     })
@@ -544,7 +561,11 @@ fn namespace(output: &str) -> Result<process::Namespace, String> {
 /// Step 8: the process, as Docker starts it, or (version 3's
 /// `init_system`) the image's init; either is PID 1 of namespaces of its
 /// own ([`namespace`]). Returns its PID here.
-fn start(config: &Config, args: &KernelArgs) -> Result<i32, String> {
+fn start(
+    config: &Config,
+    args: &KernelArgs,
+    identity: process::InstanceIdentity,
+) -> Result<i32, String> {
     let (passwd, groups) = read_accounts();
     let ExecUser {
         uid,
@@ -604,7 +625,7 @@ fn start(config: &Config, args: &KernelArgs) -> Result<i32, String> {
     )
     .map_err(|_| "the command, environment or working directory holds a NUL byte".to_owned())?;
     payload_cgroup()?;
-    spawn.namespace = Some(namespace(output)?);
+    spawn.namespace = Some(namespace(output, identity)?);
     process::spawn(&spawn).map_err(|error| match error {
         process::SpawnError::Parent(error) => format!("starting the process failed: {error}"),
         process::SpawnError::Child(stage, error) => {
@@ -615,6 +636,9 @@ fn start(config: &Config, args: &KernelArgs) -> Result<i32, String> {
                 process::Stage::Exec if config.init_system => "executing the image's init",
                 process::Stage::Exec => "executing the command",
                 process::Stage::Namespace => "entering the process's namespaces",
+                process::Stage::InstanceIdentity => {
+                    "checking /run/ghostrack/identity in the payload namespace"
+                }
                 process::Stage::Mounts => "mounting the process's namespace",
             };
             format!("{what} failed: {error}")
@@ -643,13 +667,13 @@ mod tests {
     /// console is bound inside only when it is the hypervisor console.
     #[test]
     fn every_mode_starts_in_a_namespace() {
-        let hvc = namespace("/dev/hvc0").unwrap();
+        let hvc = namespace("/dev/hvc0", process::InstanceIdentity::Unchecked).unwrap();
         assert_eq!(
             hvc.cgroup_procs.to_bytes(),
             b"/sys/fs/cgroup/payload/cgroup.procs"
         );
         assert_eq!(hvc.console.unwrap().to_bytes(), b"/dev/hvc0");
-        let console = namespace("/dev/console").unwrap();
+        let console = namespace("/dev/console", process::InstanceIdentity::Unchecked).unwrap();
         assert!(console.console.is_none());
     }
 }

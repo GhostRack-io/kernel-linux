@@ -49,8 +49,9 @@ pub fn open<'a>(entries: &[(&'a str, &str)]) -> Result<(&'a str, std::fs::File),
     ))
 }
 
-/// The largest config accepted.
-pub const MAX_BYTES: usize = 1 << 20;
+/// The config budget before adding an instance identity.
+const MAX_BYTES: usize = 1 << 20;
+const BASE_SIZE_ERROR: &str = "the config is larger than 1 MiB";
 
 /// The longest stop timeout, in the config and in a stop command.
 pub const MAX_STOP_TIMEOUT_SECONDS: u32 = 300;
@@ -80,6 +81,18 @@ const DISKS_VERSION: u64 = 6;
 
 /// The first run config version with an instance identity.
 const IDENTITY_VERSION: u64 = 7;
+const IDENTITY_FIELD: &str = "instance_identity";
+const HEX_32_DIGITS: usize = 2 * 32;
+
+/// Upper bound before parsing the mode and identity. The compact JSON
+/// member adds four quotation marks, a colon and a separating comma.
+pub fn max_bytes(boot_version: u32) -> usize {
+    if u64::from(boot_version) == IDENTITY_VERSION {
+        MAX_BYTES + IDENTITY_FIELD.len() + HEX_32_DIGITS + 6
+    } else {
+        MAX_BYTES
+    }
+}
 
 /// The most state disks a run config may list.
 pub const MAX_DISKS: usize = 8;
@@ -284,7 +297,7 @@ const FIELDS: &[&str] = &[
     "init_system",
     "volumes",
     "disks",
-    "instance_identity",
+    IDENTITY_FIELD,
 ];
 
 /// Whether `key` is a run field of config `version`: `init_system` is
@@ -295,7 +308,7 @@ fn known_field(key: &str, version: u64) -> bool {
         && (key != "init_system" || version >= INIT_SYSTEM_VERSION)
         && (key != "volumes" || version >= VOLUMES_VERSION)
         && (key != "disks" || version >= DISKS_VERSION)
-        && (key != "instance_identity" || version >= IDENTITY_VERSION)
+        && (key != IDENTITY_FIELD || version >= IDENTITY_VERSION)
 }
 
 /// Names what in `value` keeps it from parsing, without quoting a value.
@@ -374,8 +387,13 @@ fn printable(key: &str) -> String {
 /// Parses and checks the config of a boot of interface `boot_version`
 /// (`gh.v`), whose version the config's must be.
 pub fn parse(bytes: &[u8], boot_version: u32) -> Result<Boot, String> {
-    if bytes.len() > MAX_BYTES {
-        return Err("the config is larger than 1 MiB".into());
+    let limit = max_bytes(boot_version);
+    if bytes.len() > limit {
+        return Err(if limit == MAX_BYTES {
+            BASE_SIZE_ERROR.into()
+        } else {
+            format!("the config is larger than {limit} bytes")
+        });
     }
     let mut value: Value = serde_json::from_slice(bytes).map_err(|error| {
         format!(
@@ -401,6 +419,12 @@ pub fn parse(bytes: &[u8], boot_version: u32) -> Result<Boot, String> {
     let Some(object) = value.as_object_mut() else {
         return Err("the config is not a JSON object".into());
     };
+    if bytes.len() > MAX_BYTES
+        && (!object.contains_key(IDENTITY_FIELD)
+            || object.get("mode").is_some_and(|mode| mode != "run"))
+    {
+        return Err(BASE_SIZE_ERROR.into());
+    }
     match object.get("mode") {
         None => {}
         Some(Value::String(mode)) if mode == "run" => {}
@@ -423,7 +447,7 @@ fn run_config(value: &mut Value, version: u64) -> Result<Config, String> {
     if (version < INIT_SYSTEM_VERSION && value.get("init_system").is_some())
         || (version < VOLUMES_VERSION && value.get("volumes").is_some())
         || (version < DISKS_VERSION && value.get("disks").is_some())
-        || (version < IDENTITY_VERSION && value.get("instance_identity").is_some())
+        || (version < IDENTITY_VERSION && value.get(IDENTITY_FIELD).is_some())
     {
         // Not a field of this version: refused as any unknown field.
         return Err(diagnose(value, version));
@@ -436,7 +460,7 @@ fn run_config(value: &mut Value, version: u64) -> Result<Config, String> {
         .and_then(|object| object.remove("disks"));
     let identity = value
         .as_object_mut()
-        .and_then(|object| object.remove("instance_identity"));
+        .and_then(|object| object.remove(IDENTITY_FIELD));
     let mut config = Config::deserialize(&*value).map_err(|_| diagnose(value, version))?;
     check(&config)?;
     if let Some(volumes) = volumes {
@@ -768,7 +792,7 @@ fn parse_digest(text: &str) -> Option<[u8; 32]> {
 /// Decode 32 bytes written as 64 lowercase hex digits.
 fn parse_hex_32(text: &str) -> Option<[u8; 32]> {
     let hex = text.as_bytes();
-    if hex.len() != 64 {
+    if hex.len() != HEX_32_DIGITS {
         return None;
     }
     let nibble = |byte: u8| match byte {
@@ -2103,6 +2127,62 @@ mod tests {
             parse_text(&fill(MAX_BYTES + 1)).unwrap_err(),
             "the config is larger than 1 MiB"
         );
+    }
+
+    #[test]
+    fn identity_size_allowance() {
+        let secret = "0123456789abcdef".repeat(4);
+        let mut run = serde_json::json!({"version": 7, "argv": ["a"], "env": ["K="]});
+        let padding = MAX_BYTES - run.to_string().len();
+        run["env"][0] = format!("K={}", "x".repeat(padding)).into();
+        assert_eq!(run.to_string().len(), MAX_BYTES);
+        run[IDENTITY_FIELD] = secret.clone().into();
+        let mut bytes = serde_json::to_vec(&run).unwrap();
+        assert_eq!(bytes.len(), MAX_BYTES + 87);
+        let Boot::Run(config) = parse(&bytes, 7).unwrap() else {
+            panic!("expected run mode")
+        };
+        assert!(config.instance_identity.is_some());
+        bytes.push(b'!');
+        assert_eq!(
+            parse(&bytes, 7).unwrap_err(),
+            "the config is larger than 1048663 bytes"
+        );
+
+        run[IDENTITY_FIELD] = secret.to_uppercase().into();
+        let error = parse(&serde_json::to_vec(&run).unwrap(), 7).unwrap_err();
+        assert!(!error.contains(&secret.to_uppercase()));
+        assert_eq!(
+            error,
+            "config field `instance_identity` must be 64 lowercase hexadecimal digits"
+        );
+    }
+
+    #[test]
+    fn base_limit_without_identity_and_in_unpack_mode() {
+        for version in 1..=7 {
+            let mut run = serde_json::json!({"version": version, "argv": ["a"]});
+            if version > 1 {
+                run["mode"] = "run".into();
+            }
+            let mut bytes = serde_json::to_vec(&run).unwrap();
+            bytes.resize(MAX_BYTES, b' ');
+            assert!(matches!(parse(&bytes, version), Ok(Boot::Run(_))));
+            bytes.push(b' ');
+            assert_eq!(parse(&bytes, version).unwrap_err(), BASE_SIZE_ERROR);
+        }
+        let mut unpack = serde_json::json!({"version": 7, "mode": "unpack", "layers": [{
+            "media_type": TAR, "digest": DIGEST, "size": 1
+        }]});
+        let mut bytes = serde_json::to_vec(&unpack).unwrap();
+        bytes.resize(MAX_BYTES, b' ');
+        assert!(matches!(parse(&bytes, 7), Ok(Boot::Unpack(_))));
+        bytes.push(b' ');
+        assert_eq!(parse(&bytes, 7).unwrap_err(), BASE_SIZE_ERROR);
+        unpack[IDENTITY_FIELD] = "a".repeat(64).into();
+        let mut bytes = serde_json::to_vec(&unpack).unwrap();
+        bytes.resize(MAX_BYTES + 1, b' ');
+        assert_eq!(parse(&bytes, 7).unwrap_err(), BASE_SIZE_ERROR);
     }
 
     #[test]

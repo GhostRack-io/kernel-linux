@@ -144,7 +144,7 @@ fn no_fallback_tunnels() {
 fn read_config(version: u32) -> Result<Boot, String> {
     let (name, file) = config::open(&config::ENTRIES)?;
     let mut bytes = Vec::new();
-    let limit = u64::try_from(config::MAX_BYTES)
+    let limit = u64::try_from(config::max_bytes(version))
         .unwrap_or(u64::MAX)
         .saturating_add(1);
     file.take(limit)

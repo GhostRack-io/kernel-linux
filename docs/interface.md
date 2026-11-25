@@ -142,8 +142,10 @@ init turns off duplicate address detection on `eth0`
 
 The fw_cfg entry `opt/ghostrack/config`, read from
 `/sys/firmware/qemu_fw_cfg/by_name/opt/ghostrack/config/raw`: one JSON
-object, at most 1 MiB (1,048,576 bytes). When that file is absent, the
-init reads `opt/gigahost/config` instead
+object, at most 1 MiB (1,048,576 bytes). A version 7 run config with a
+valid `instance_identity` may use 87 additional bytes for the field and
+its separator, for a total of 1,048,663 bytes. When that file is
+absent, the init reads `opt/gigahost/config` instead
 (`.../by_name/opt/gigahost/config/raw`), the entry's name before release
 6.18.57-gh8; a new entry that is present
 but cannot be opened or read is an error, and the old one is not read.
